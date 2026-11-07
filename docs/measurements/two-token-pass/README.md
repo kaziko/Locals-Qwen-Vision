@@ -27,23 +27,24 @@ kinds and prints the same tables for the old ones.
   1.19x at about 1.13x to 1.18x with the mean of the two. Now each round times the passes forward and back (for
   example 1 2 3 3 2 1). Each pass is timed twice, and a round counts the mean of the two.
 - **The order rotates.** The first pass is 1 token in round 0, 2 in round 1, 3 in round 2, and so on. Each round
-  records its order (`order`). Then an order effect shows as a difference between rounds, not as noise.
+  records its order (`order`). Then an order effect shows as a difference between rounds, not as noise. The
+  default is now 6 rounds (it was 5), so each pass goes first equally often.
 - **The probe brackets the timed steps.** It runs right before the 30 timed steps (after the fresh cache and the
   warm steps) and right after them (`probe_before`, `probe_after`). `summarize.py` counts the slower of the two.
-- **No build is left out of the pipeline.** `pipelined` queues its first timed step before the timer starts. All 30
-  builds then overlap a step on the GPU. The old method left the first build outside the pipeline: about 0.04 to
+- **No build is left out of the pipeline.** `pipelined` builds and queues its first timed step before the timer
+  starts. Each of the other 29 builds overlaps the step before it on the GPU. The old method left the first build outside the pipeline: about 0.04 to
   0.07 ms a step, the issue's estimate from `split`.
 - **The run marks the GPU busy.** While it runs, other Locals processes see it as busy (`kernels.others_busy()`), so
   a server's idle tuner does not time kernels during a measurement. The mark comes from a thread once a second,
   and not inside a timed section (`timing_setup.BusyMarker` in `..`).
 - **The result says what made it.** `setup` holds the sha256 of `step_timing.py`, `summarize.py` and
   `timing_setup.py` (`scripts`). It also holds the Locals servers found at the start and at the end of the run
-  (`servers_at_start`, `servers_at_end`: `locals.app`'s check, any port, any install). A run with a server in
-  either list did not have the GPU to itself.
-- **One tune-key helper.** `--force` builds its keys with `kernels._tune_key` and `kernels._mod_dt`, as warm-up and
-  `kernels._choose` do. Warm-up now builds its inputs in the activations' dtype too (the compute dtype
-  `Runtime.load` records on each layer), so a model whose scales and activations differ gets the warm-up choices
-  that decode reads.
+  (`servers_at_start`, `servers_at_end`: `locals.app`'s check, any port, any install). A server in either list was
+  running at that moment, idle or not. A server that started and stopped during the run is in neither list.
+- **One tune-key helper.** `--force` builds its keys with `kernels._tune_key`, as `kernels.py` does everywhere,
+  and takes their dtype from `kernels._mod_dt`: the activations' dtype (the compute dtype `Runtime.load` records on
+  each layer). Warm-up now builds its inputs in that dtype too, and `kernels._choose` keys on its input's dtype, so
+  a model whose scales and activations differ gets the warm-up choices that decode reads.
 
 `mtp_test.py` in `../mtp` times its main steps the same way (1 2 3 3 2 1, the mean of each pass's two). It marks
 the GPU busy too, and records the same `setup`. It has no probe.

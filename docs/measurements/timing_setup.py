@@ -30,7 +30,18 @@ def server_pids() -> list:
     return sorted(_locals_server_pids())
 
 
+def end_of_run(busy, setup: dict) -> None:
+    """The end of a timed run: the busy marker stopped, and the Locals servers running now recorded and printed."""
+    busy.stop()
+    setup["servers_at_end"] = server_pids()
+    print(f"Locals servers: at the start {setup['servers_at_start'] or 'none'}, at the end {setup['servers_at_end'] or 'none'}",
+          flush=True)
+
+
 class BusyMarker:
+    """Marks this process busy for other Locals processes (kernels.mark_busy) from start() to stop(), once every
+    ``interval`` seconds, and never inside a quiet() section."""
+
     def __init__(self, interval: float = 1.0):
         self.interval = interval
         self._lock = threading.Lock()  # held inside a timed section: the thread marks nothing then
@@ -62,9 +73,3 @@ class BusyMarker:
         with self._lock:
             kernels.mark_busy(now=True)
             yield
-
-    def __enter__(self):
-        return self.start()
-
-    def __exit__(self, *exc):
-        self.stop()

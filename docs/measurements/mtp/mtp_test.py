@@ -194,8 +194,5 @@ for bits in (None, 4):
     k1 = (1 + a1) / (r2 + cc); k2 = (1 + a1 + a1 * a2) / (r3 + 2 * cc)
     print(f"MTP {lab} guess: {c * 1e3:.2f} ms = {cc:.2f} of a main step | estimate, 1 draft: {k1:.2f}x, 2 drafts: {k2:.2f}x "
           f"(with 4-bit acceptance; before the pipelining loss)", flush=True)
-busy.stop()
-setup["servers_at_end"] = TS.server_pids()
-print(f"Locals servers: at the start {setup['servers_at_start'] or 'none'}, at the end {setup['servers_at_end'] or 'none'}",
-      flush=True)
+TS.end_of_run(busy, setup)
 json.dump(res, open(sys.argv[2], "w"), indent=1)

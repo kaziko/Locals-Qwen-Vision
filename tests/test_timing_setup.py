@@ -44,8 +44,17 @@ def _wait(cond, limit):
     return cond()
 
 
-def test_another_process_sees_the_gpu_busy_while_the_marker_runs():
-    p = subprocess.Popen([sys.executable, "-c", CHILD], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def _own_busy_dir(tmp_path, monkeypatch) -> dict:
+    """This test's busy files in a folder of its own (a Locals server on this Mac marks the shared one): kernels'
+    folder here, and the child's environment, whose temporary folder decides its own (kernels._BUSY_DIR)."""
+    monkeypatch.setattr(kernels, "_BUSY_DIR", str(tmp_path / "locals-gpu"))
+    return {**os.environ, "TMPDIR": str(tmp_path)}
+
+
+def test_another_process_sees_the_gpu_busy_while_the_marker_runs(tmp_path, monkeypatch):
+    env = _own_busy_dir(tmp_path, monkeypatch)
+    p = subprocess.Popen([sys.executable, "-c", CHILD], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                         env=env)
     try:
         assert p.stdout.readline().strip() == "on"
         assert _wait(kernels.others_busy, 2.0)  # (its first mark is at start)
@@ -61,7 +70,8 @@ def test_another_process_sees_the_gpu_busy_while_the_marker_runs():
         p.wait()
 
 
-def test_the_marker_marks_nothing_inside_a_timed_section():
+def test_the_marker_marks_nothing_inside_a_timed_section(tmp_path, monkeypatch):
+    _own_busy_dir(tmp_path, monkeypatch)
     b = _module().BusyMarker()
     path = kernels._busy_file(os.getpid())
     b.start()

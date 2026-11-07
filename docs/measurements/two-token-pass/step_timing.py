@@ -3,7 +3,8 @@ The model is loaded with Locals' Runtime (float16, fused layers, small-batch ker
 cache holds a prompt and its greedy reply (at most 192 tokens), as in mtp_test.py's timing. Then, in each of
 --rounds rounds, the passes of S = 1, 2 and 3 tokens in the round's order: the order rotates by one each round
 (1 2 3, then 2 3 1, then 3 1 2) and each round's sync measurements run it forward and back (1 2 3 3 2 1), so each
-pass is timed twice a round, as often in each place, and a drift within the round reaches every pass alike:
+pass is timed twice a round, and a drift within the round reaches every pass alike. With a multiple of 3 rounds
+(the default 6), each pass goes first equally often:
   sync      mtp_test.py's timing (a fresh cache, 3 warm steps, 30 timed steps, one mx.eval a step); per round, the
             mean of a pass's two measurements, the same for every pass
   split     the same steps, each cut into building the graph (Python), encoding it (mx.async_eval returns) and
@@ -19,7 +20,7 @@ First it prints the kernel each 4-bit matmul shape gets at 1, 2 and 3 rows.
 --force M=FAMILY gives every shape at M rows that kernel family's tuned winner (mlx = MLX's own kernel);
 --force M@NxK=FAMILY only the shape N x K. Repeatable. The choices are set in this process only. A spec that
 cannot be read, or that forces no shape, stops the run.
-Usage: step_timing.py MODEL OUT.json [--rounds 5] [--force SPEC ...]"""
+Usage: step_timing.py MODEL OUT.json [--rounds 6] [--force SPEC ...]"""
 import argparse
 import json
 import os
@@ -44,7 +45,7 @@ import timing_setup as TS  # noqa: E402  (docs/measurements/timing_setup.py)
 ap = argparse.ArgumentParser()
 ap.add_argument("model")
 ap.add_argument("out")
-ap.add_argument("--rounds", type=int, default=5)
+ap.add_argument("--rounds", type=int, default=6)
 ap.add_argument("--force", action="append", default=[])
 a = ap.parse_args()
 forces = []  # (spec, rows, "NxK" or "", family) of each --force, checked before the model loads
@@ -214,10 +215,7 @@ for r in range(a.rounds):
           + " ms | split (build + encode + wait) "
           + ", ".join(f"S={S} {b:.2f}+{e:.2f}+{w:.2f}" for S, (b, e, w) in sp.items())
           + " | pipelined " + ", ".join(f"S={S} {v:.2f}" for S, v in pp.items()), flush=True)
-busy.stop()
-setup["servers_at_end"] = TS.server_pids()
-print(f"Locals servers: at the start {setup['servers_at_start'] or 'none'}, at the end {setup['servers_at_end'] or 'none'}",
-      flush=True)
+TS.end_of_run(busy, setup)
 
 
 def summary(vals):

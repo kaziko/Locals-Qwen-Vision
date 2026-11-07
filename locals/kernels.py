@@ -1570,8 +1570,10 @@ def tune_model(model, mode: str = "auto", log=None, dtype: Optional[str] = None)
     (set_compute_dtype's), recorded on each layer (_act_dtype); without it, a layer's scales' dtype stands in."""
     import sys as _sys
 
-    if dtype in ("float16", "bfloat16"):  # (a layer with float32 scales keeps them: set_compute_dtype says
-        for _, mod in model.named_modules():  # "float16" for any model without bf16 arrays, which it leaves as they are)
+    # (a layer with float32 scales keeps its own dtype: set_compute_dtype says "float16" for any model without bf16
+    # arrays, and leaves those arrays as they are)
+    if dtype in ("float16", "bfloat16"):
+        for _, mod in model.named_modules():
             if _tunable(mod) and mod["scales"].dtype in (mx.float16, mx.bfloat16):
                 object.__setattr__(mod, "_locals_act_dtype", getattr(mx, dtype))
 
