@@ -161,3 +161,27 @@ def test_a_corrected_preset_reaches_a_mac_that_ran_the_old_one(tmp_path, monkeyp
     tune = kernels._load_tune()
     assert tune["2560x4096x8"] == ("mlx",) and tune["9216x2560x8"] == ("mlx",)
     assert tune["__times__"] == {"2560x4096x8": {"mlx": 9.0}, "9216x2560x8": {"mlx": 20.0}}
+
+
+def test_the_user_file_is_per_mlx_version_unless_locals_tune_cache_names_one(tmp_path):
+    """Two installs with two MLX versions shared one file and rewrote each other's version (and stale shapes)."""
+    import os
+    import subprocess
+    import sys
+
+    import mlx.core as mx
+
+    child = ("import mlx.core as mx\nfrom locals import kernels\n"
+             "print(kernels._TUNE_PATH, mx.__version__, mx.device_info()['architecture'], kernels._seed()[0],"
+             " sep='\\n')")
+    env = {k: v for k, v in os.environ.items() if k != "LOCALS_TUNE_CACHE"}
+    seed = tmp_path / f"tune_v6_{mx.device_info()['architecture']}.json"
+    seed.write_text("{}")  # (a seed, were the path not named)
+
+    named = subprocess.run([sys.executable, "-c", child], env=dict(env, LOCALS_TUNE_CACHE=str(tmp_path / "tune.json")),
+                           capture_output=True, text=True, check=True).stdout.splitlines()
+    assert named[0] == str(tmp_path / "tune.json") and named[3] == "None"
+
+    path, version, arch, _ = subprocess.run([sys.executable, "-c", child], env=dict(env, HOME=str(tmp_path)),
+                                            capture_output=True, text=True, check=True).stdout.splitlines()
+    assert path == str(tmp_path / ".cache" / "locals" / f"tune_v6_{arch}_mlx{version}.json")

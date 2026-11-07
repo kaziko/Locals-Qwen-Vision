@@ -132,8 +132,12 @@ import time as _time
 
 MIN_M = 1
 MAX_M = 32
-_TUNE_FILE = "tune_v6_%s.json" % mx.device_info()["architecture"]
-_TUNE_PATH = _os.environ.get("LOCALS_TUNE_CACHE") or _os.path.expanduser("~/.cache/locals/" + _TUNE_FILE)
+_TUNE_STEM = "tune_v6_%s" % mx.device_info()["architecture"]
+_TUNE_FILE = _TUNE_STEM + ".json"  # (the shipped preset's name, and the user's before versioned names)
+# The user's file is per MLX version: two installs on one Mac (a uv tool and a repo's venv) shared one, and each start
+# under the other version rewrote its version and its stale shapes. LOCALS_TUNE_CACHE names one file for every version.
+_TUNE_PATH_FROM_ENV = _os.environ.get("LOCALS_TUNE_CACHE")
+_TUNE_PATH = _TUNE_PATH_FROM_ENV or _os.path.expanduser(f"~/.cache/locals/{_TUNE_STEM}_mlx{mx.__version__}.json")
 _TUNE = None
 _MULTI_CANDIDATES = [(8, 4, 2), (16, 4, 2), (8, 2, 2)]  # (VPT, R, NSG), M <= 4
 _V3_CANDIDATES = [(8, 8, 2), (8, 4, 2), (16, 4, 2), (16, 4, 4), (16, 2, 2)]  # (VPT, R, NSG), 3 <= M <= 6
@@ -177,26 +181,50 @@ _SHAPE_KEY = __import__("re").compile(r"\d+x\d+x(\d+|P)(x[a-z0-9]+)?")  # a matm
 _RETIME = False  # set while a tuner runs (the idle tuner, locals tune): stale shapes are timed again then
 
 
-def _mark_stale(tune: dict, user: Optional[dict]) -> bool:
+def _shape_keys(tune: dict) -> set:
+    """The shapes a tuning file timed (what a version change makes stale)."""
+    return {k for k in tune if _SHAPE_KEY.fullmatch(k)}
+
+
+def _pinned(tune: dict) -> set:
+    """The shapes that stopped locals twice while timed: they keep their choice and are never stale (_crashed_shapes)."""
+    return {k for k, n in (tune.get("__crashed__") or {}).items() if n >= 2}
+
+
+def _mark_stale(tune: dict, user: Optional[dict], seeded: bool = False) -> bool:
     """After an MLX upgrade (the user's file says another version), the shapes this Mac timed are stale: still used,
     and timed again by the idle tuner or locals tune (``__stale__``). Choices timed under an older MLX stayed for good.
-    Whether anything changed (the file then gets this version)."""
-    import sys
-
+    With ``seeded`` (``user`` is another file this version's file starts from: _seed), every shape in it is stale,
+    unless it names this MLX and holds no ``__stale__`` list (only a version change writes one: a file one MLX
+    wrote all along). The shapes pinned after two crashes are never stale. Whether anything changed (the file then
+    gets this version). The log line comes after the save (_report_stale)."""
     now = mx.__version__
     was = (user or {}).get("__mlx__")
     tune["__mlx__"] = now
-    if user is None or was == now:
-        return user is not None and was is None  # (a file from before this: it gets the version, nothing stale)
-    if was is None:
-        return True
-    stale = sorted({k for k in user if _SHAPE_KEY.fullmatch(k)} | set(tune.get("__stale__") or []))
-    tune["__stale__"] = stale
-    if stale:
-        print(f"locals: MLX is {now} now ({was} when this Mac's kernels were timed): the {len(stale)} kernel shapes timed "
-              f"here keep their choice until they are timed again, the served model's while the server is idle, or all "
-              f"of a model's at once with locals tune", file=sys.stderr, flush=True)
+    if user is None:
+        return False
+    if was == now and not (seeded and "__stale__" in user):
+        return seeded  # (a seed: this version's file is written all the same)
+    if was is None and not seeded:
+        return True  # (a file from before this: it gets the version, nothing stale)
+    tune["__stale__"] = sorted((_shape_keys(user) | set(tune.get("__stale__") or [])) - _pinned(tune))
     return True
+
+
+def _report_stale(user: dict, seed: Optional[str]) -> None:
+    """The log line of a version change or a seed (``user``: the file read, or the seed). The count is the stale
+    list after the save, which merges with the file on disk and can change it (the list in memory, when the save
+    failed)."""
+    import sys
+
+    n = len(_TUNE.get("__stale__") or ())
+    if not n:
+        return
+    whence = (f"this MLX's tuning file starts from {seed}" if seed else
+              f"MLX is {mx.__version__} now ({user.get('__mlx__')} when this Mac's kernels were timed)")
+    print(f"locals: {whence}: the {n} kernel shapes timed here keep their choice until they are timed again, the "
+          f"served model's while the server is idle, or all of a model's at once with locals tune",
+          file=sys.stderr, flush=True)
 
 
 def _key_dt(dt: str, mod) -> str:
@@ -253,6 +281,26 @@ def _beyond_preset(data: dict) -> dict:
     return out
 
 
+def _seed() -> tuple:
+    """The file a first start under this MLX starts from, and what it holds: of the user files for this GPU (the one
+    from before versioned names, ``tune_v6_<arch>.json``, and other versions'), the one written last that parses.
+    ``(None, None)`` with ``LOCALS_TUNE_CACHE``, or with none. A file that does not parse is passed over, not set
+    aside: it is another version's to deal with."""
+    import glob
+
+    if _TUNE_PATH_FROM_ENV:
+        return None, None
+    d = _os.path.dirname(_TUNE_PATH)
+    versions = glob.glob(_os.path.join(glob.escape(d), _TUNE_STEM + "_mlx*.json"))
+    found = [p for p in [_os.path.join(d, _TUNE_FILE), *versions] if p != _TUNE_PATH and _os.path.isfile(p)]
+    for p in sorted(found, key=_os.path.getmtime, reverse=True):
+        try:
+            return p, _read_tune(p)
+        except Exception:  # noqa: BLE001
+            continue
+    return None, None
+
+
 def _load_tune():
     """The tuning choices: the shipped preset for this GPU, overridden by the user's own cache. A
     cache file that does not parse (a write cut short) is set aside, not silently replaced."""
@@ -269,7 +317,7 @@ def _load_tune():
                     tune.update(copy.deepcopy(_PRESET))  # (shared, what tuning adds to __times__ went into _PRESET too)
                 except Exception:  # noqa: BLE001
                     pass
-            user = None
+            user = seed = None
             if _os.path.exists(_TUNE_PATH):
                 try:
                     user = _read_tune(_TUNE_PATH)
@@ -278,9 +326,11 @@ def _load_tune():
                         _os.replace(_TUNE_PATH, _TUNE_PATH + ".bad")
                     except OSError:
                         pass
+            else:
+                seed, user = _seed()  # (read only: the seed file stays as it is)
             for k, v in (user or {}).items():  # over the preset; a dict-valued key (__times__) entry by entry
                 tune[k] = {**tune[k], **v} if isinstance(v, dict) and isinstance(tune.get(k), dict) else v
-            upgraded = _mark_stale(tune, user)
+            upgraded = _mark_stale(tune, user, seeded=seed is not None)
             _TUNE = tune
             crashed = _crashed_shapes(tune)
             _drop_old_temps()
@@ -289,6 +339,8 @@ def _load_tune():
                     _save_tune()
                 except OSError:
                     pass
+            if upgraded:
+                _report_stale(user, seed)
     return _TUNE
 
 
@@ -429,7 +481,10 @@ def _crashed_shapes(tune: dict) -> bool:
         crashed = tune.setdefault("__crashed__", {})
         crashed[key] = crashed.get(key, 0) + 1
         changed = True
-        if crashed[key] >= 2 and not isinstance(tune.get(key), tuple):
+        if crashed[key] < 2:
+            continue
+        _unstale(tune, key)  # (stale, it was timed again: the abort at every start this pin is for)
+        if not isinstance(tune.get(key), tuple):
             tune[key] = ("mlx",)
             print(f"locals: timing the tuned kernels for the shape {key} stopped locals twice; that shape keeps MLX's "
                   f"kernel", file=sys.stderr, flush=True)
@@ -438,7 +493,9 @@ def _crashed_shapes(tune: dict) -> bool:
 
 def _merge_tune(mine: dict, theirs: dict) -> dict:
     """Two tuning caches as one: ``mine`` (this process's) wins a key both have; the timings (``__times__``) and
-    the lists of whole-step-tuned row counts are merged inside."""
+    the lists of whole-step-tuned row counts are merged inside. ``__stale__`` keeps what both still list (one that
+    timed a shape again took it off), unless ``theirs`` was written under another MLX: then ``mine``'s list holds, and
+    the shapes only ``theirs`` has are stale too."""
     out = dict(theirs)
     for k, v in mine.items():
         w = out.get(k)
@@ -450,6 +507,9 @@ def _merge_tune(mine: dict, theirs: dict) -> dict:
             out[k] = list(dict.fromkeys([*w, *v]))
         else:
             out[k] = v
+    if theirs.get("__mlx__") not in (None, mine.get("__mlx__")):  # (theirs timed under another MLX: one shared file)
+        stale = set(mine.get("__stale__") or ())  # (the intersection is for two processes of one version)
+        out["__stale__"] = sorted(stale | (_shape_keys(theirs) - mine.keys()))
     return out
 
 
