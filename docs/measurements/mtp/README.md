@@ -24,7 +24,11 @@ position i and the embedding of token i+1, it predicts token i+2. The 4-bit MLX 
   The committed results come from that method, which took the lower of the two 1-token values. Since issue #25 each
   main step is timed twice, forward and back (1 2 3 3 2 1), and the mean of the two counts. While the script runs,
   other Locals processes see the GPU as busy. The result's `setup` holds the scripts' hashes and the Locals servers
-  found at the start and at the end (see `../two-token-pass/README.md`).
+  found at the start and at the end (see `../two-token-pass/README.md`). A first run with the new method, on
+  Zwyrol at commit `936c6c0`, is in `results/method25/`: main steps 11.05, 12.80 and 16.35 ms for 1, 2 and 3 tokens
+  (the mean of each pass's two), and no Locals server at the start or at the end. The command was the Zwyrol line
+  below, with the output in `<scratch>/runs/mtp_method25_1.json` and `LOCALS_TUNE_CACHE` set to the copy that
+  `../two-token-pass/README.md` describes.
 
 ## Commands
 

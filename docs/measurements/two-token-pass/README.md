@@ -49,6 +49,24 @@ kinds and prints the same tables for the old ones.
 `mtp_test.py` in `../mtp` times its main steps the same way (1 2 3 3 2 1, the mean of each pass's two). It marks
 the GPU busy too, and records the same `setup`. It has no probe.
 
+### A first run of the new method
+
+This run checks that the new method works and writes every field. It is not a new measurement for #22: it has only
+3 rounds. Zwyrol, commit `936c6c0`, the same Mac, `.venv` and tuning-file copy as above, 2026-11-07. Command, with
+the environment of "Commands" below:
+
+```
+<repo>/.venv/bin/python step_timing.py Kaziko/Qwen3.5-4B-Zwyrol <scratch>/runs/method25_1.json --rounds 3 > <scratch>/runs/method25_1.txt 2>&1
+```
+
+The result is in `results/method25/` (a folder of its own, so `summarize.py results/*.json` prints what it printed
+before). `servers_at_start` and `servers_at_end` are both empty. The rounds ran in the orders 1 2 3, 2 3 1 and
+3 1 2, and each pass was timed twice in each round. From `summarize.py results/method25/*.json`: sync 10.89, 12.94 and
+16.37 ms for 1, 2 and 3 tokens (2 / 1: 1.19x); pipelined 8.16, 9.25 and 12.30 ms (1.13x); the probe 1.258 ms on
+average (1.153 to 2.883). The slowest probe (2.883 ms) came right after round 0's first 1-token measurement. The old
+method had no probe after the timed steps, so it could not have seen this. No sync measurement was more than 1.10x
+its run's median.
+
 ## What the scripts did in these runs (the old method)
 
 `step_timing.py` loads the model with `Runtime.load` (as `mtp_test.py` does), prints the kernel each 4-bit matmul shape
