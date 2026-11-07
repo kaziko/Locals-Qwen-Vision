@@ -21,6 +21,10 @@ position i and the embedding of token i+1, it predicts token i+2. The 4-bit MLX 
   (the layer fed its own output again over the same sequence: an approximation of a chained draft).
 - Last, it times a main step of 1, 2 and 3 tokens and one guess (the layer, the output head, argmax), with one
   `mx.eval` per step and no pipelining. The 1-token step is timed first and last, as the noise floor.
+  The committed results come from that method, which took the lower of the two 1-token values. Since issue #25 each
+  main step is timed twice, forward and back (1 2 3 3 2 1), and the mean of the two counts. While the script runs,
+  other Locals processes see the GPU as busy. The result's `setup` holds the scripts' hashes and the Locals servers
+  found at the start and at the end (see `../two-token-pass/README.md`).
 
 ## Commands
 

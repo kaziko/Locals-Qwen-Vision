@@ -13,7 +13,42 @@ record it). Every run read a copy of this Mac's kernel-tuning file (`LOCALS_TUNE
 real one. That file has no entry for Qwen3.5-4B's matmul shapes, so every kernel choice came from the preset shipped
 for this GPU architecture (`locals/presets/tune_v6_applegpu_g14s.json`), the same as without the copy.
 
-## What the scripts do
+Every number in this file comes from the old method (issue #22), described under "What the scripts did in these
+runs". `step_timing.py` now times differently (issue #25, next section); its old version made every committed result.
+
+## The method since issue #25
+
+A review of these runs ([issue #25](https://github.com/kaziko/Locals-Qwen-Vision/issues/25)) found gaps in the old
+method. `step_timing.py` now works like this. The old result files stay as they were, and `summarize.py` reads both
+kinds and prints the same tables for the old ones.
+
+- **The same count and statistic for every pass.** The old method timed 1 token twice a round and took the lower
+  value, but timed 2 and 3 tokens once each. That pushes the 2 / 1 ratio up: the issue puts the README's 1.17x to
+  1.19x at about 1.13x to 1.18x with the mean of the two. Now each round times the passes forward and back (for
+  example 1 2 3 3 2 1). Each pass is timed twice, and a round counts the mean of the two.
+- **The order rotates.** The first pass is 1 token in round 0, 2 in round 1, 3 in round 2, and so on. Each round
+  records its order (`order`). Then an order effect shows as a difference between rounds, not as noise.
+- **The probe brackets the timed steps.** It runs right before the 30 timed steps (after the fresh cache and the
+  warm steps) and right after them (`probe_before`, `probe_after`). `summarize.py` counts the slower of the two.
+- **No build is left out of the pipeline.** `pipelined` queues its first timed step before the timer starts. All 30
+  builds then overlap a step on the GPU. The old method left the first build outside the pipeline: about 0.04 to
+  0.07 ms a step, the issue's estimate from `split`.
+- **The run marks the GPU busy.** While it runs, other Locals processes see it as busy (`kernels.others_busy()`), so
+  a server's idle tuner does not time kernels during a measurement. The mark comes from a thread once a second,
+  and not inside a timed section (`timing_setup.BusyMarker` in `..`).
+- **The result says what made it.** `setup` holds the sha256 of `step_timing.py`, `summarize.py` and
+  `timing_setup.py` (`scripts`). It also holds the Locals servers found at the start and at the end of the run
+  (`servers_at_start`, `servers_at_end`: `locals.app`'s check, any port, any install). A run with a server in
+  either list did not have the GPU to itself.
+- **One tune-key helper.** `--force` builds its keys with `kernels._tune_key` and `kernels._mod_dt`, as warm-up and
+  `kernels._choose` do. Warm-up now builds its inputs in the activations' dtype too (the compute dtype
+  `Runtime.load` records on each layer), so a model whose scales and activations differ gets the warm-up choices
+  that decode reads.
+
+`mtp_test.py` in `../mtp` times its main steps the same way (1 2 3 3 2 1, the mean of each pass's two). It marks
+the GPU busy too, and records the same `setup`. It has no probe.
+
+## What the scripts did in these runs (the old method)
 
 `step_timing.py` loads the model with `Runtime.load` (as `mtp_test.py` does), prints the kernel each 4-bit matmul shape
 gets at 1, 2 and 3 rows, fills a cache with the same prompt and greedy reply as `mtp_test.py`'s timing (167 tokens for
@@ -72,6 +107,8 @@ every forced run, the two are the same: Runtime printed `compute dtype float16` 
 `set_compute_dtype` casts every bf16 array to that dtype, the scales included.
 
 ## Results
+
+All the tables below come from the old method.
 
 ### The unchanged code: the noise floor
 

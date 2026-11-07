@@ -236,3 +236,36 @@ def test_other_models_layers_are_timed_as_before(tmp_path, monkeypatch):
             assert "fragq" not in fams and not chained
             assert not tiles & {("frag", 2, 8, 1), ("frag", 1, 4, 1)}
             assert "1024x512x8xbfloat16" in kernels._load_tune()
+
+
+def test_the_tune_key_helper_gives_the_keys_tuning_files_hold():
+    """One helper builds a matmul shape's tuning key: the strings the users' tuning files hold (issue #25)."""
+    assert kernels._tune_key(1024, 512, 8, "float16") == "1024x512x8"
+    assert kernels._tune_key(1024, 512, 8, "bfloat16") == "1024x512x8xbfloat16"
+    assert kernels._tune_key(1024, 512, 8, "bfloat16flint") == "1024x512x8xbfloat16flint"
+    assert kernels._tune_key(1024, 512, 8, "float16flint") == "1024x512x8xfloat16flint"
+    assert kernels._tune_key(248320, 2560, "P", "float16") == "248320x2560xP"  # how prompts are read (_prefill_key)
+    assert kernels._tune_key(248320, 2560, "P", "bfloat16") == "248320x2560xPxbfloat16"
+
+
+def test_warmup_compiles_the_choices_decode_reads_when_scales_and_activations_differ(tmp_path, monkeypatch):
+    """A layer whose scales are bfloat16 in a model computing in float16 (issue #25, item 7): warm-up looks its
+    choices up under the activations' dtype, as decode does (_choose keys on the input it is given), so decode
+    finds them and nothing is timed in a request."""
+    monkeypatch.setattr(kernels, "_TUNE_PATH", str(tmp_path / "tune.json"))
+    monkeypatch.setattr(kernels, "_preset_path", lambda: None)
+    monkeypatch.setattr(kernels, "_TUNE", None)
+    monkeypatch.setattr(kernels, "_CHOICE", {})
+    timed = []
+    monkeypatch.setattr(kernels, "_tune_shape", lambda x2, mod, M, *a: timed.append((M, str(x2.dtype))) or ("mlx",))
+    layer = nn.QuantizedLinear(512, 1024, bits=4, group_size=64)
+    layer.set_dtype(mx.bfloat16)
+    model = nn.Sequential(layer)
+    (tmp_path / "tune.json").write_text(json.dumps({"__mlx__": mx.__version__, "1024x512x1": ["mlx"], "1024x512x2": ["mlx"]}))
+    kernels.tune_model(model, mode="off", dtype="float16")  # (Runtime.load: the compute dtype set_compute_dtype chose)
+    kernels.warmup(model, range(1, 3))
+    assert timed == []  # warm-up found the float16 keys
+    assert {k for k in kernels._CHOICE if k[:2] == (1024, 512)} == {(1024, 512, 1, "float16"), (1024, 512, 2, "float16")}
+    for M in (1, 2):
+        assert kernels._choose(mx.zeros((M, 512), mx.float16), layer) == ("mlx",)  # decode's input
+    assert timed == []

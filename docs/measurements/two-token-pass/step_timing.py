@@ -1,14 +1,20 @@
 """Issue #22: the cost of a decode pass of 1, 2 and 3 tokens, and where it goes.
 The model is loaded with Locals' Runtime (float16, fused layers, small-batch kernels), as mtp_test.py loads it. The
 cache holds a prompt and its greedy reply (at most 192 tokens), as in mtp_test.py's timing. Then, in each of
---rounds rounds:
-  sync      S = 1, 2, 3, 1: mtp_test.py's timing (a fresh cache, 3 warm steps, 30 timed steps, one mx.eval a step)
+--rounds rounds, the passes of S = 1, 2 and 3 tokens in the round's order: the order rotates by one each round
+(1 2 3, then 2 3 1, then 3 1 2) and each round's sync measurements run it forward and back (1 2 3 3 2 1), so each
+pass is timed twice a round, as often in each place, and a drift within the round reaches every pass alike:
+  sync      mtp_test.py's timing (a fresh cache, 3 warm steps, 30 timed steps, one mx.eval a step); per round, the
+            mean of a pass's two measurements, the same for every pass
   split     the same steps, each cut into building the graph (Python), encoding it (mx.async_eval returns) and
             waiting for the GPU (mx.eval returns); medians
-  pipelined step s+1 built and queued while step s runs, as the engines decode: the GPU's time, with the CPU's
-            time hidden behind it
-  probe     before each sync measurement, 30 synchronous calls of MLX's own 4-bit matmul (mx.quantized_matmul, no
-            Locals code) on the output head's weights, 1 row: how fast this GPU is at that moment
+  pipelined step s+1 built and queued while step s runs, as the engines decode (the first one queued before the
+            timer starts): the GPU's time, with the CPU's time hidden behind it
+  probe     right before each sync measurement's timed steps (after its fresh cache and warm steps) and right after
+            them, 30 synchronous calls of MLX's own 4-bit matmul (mx.quantized_matmul, no Locals code) on the
+            output head's weights, 1 row: how fast this GPU is at that moment
+While it runs, other Locals processes see the GPU as busy (timing_setup.BusyMarker: a server's idle tuner waits);
+the result's setup holds the scripts' hashes and the Locals servers running at the start and at the end.
 First it prints the kernel each 4-bit matmul shape gets at 1, 2 and 3 rows.
 --force M=FAMILY gives every shape at M rows that kernel family's tuned winner (mlx = MLX's own kernel);
 --force M@NxK=FAMILY only the shape N x K. Repeatable. The choices are set in this process only. A spec that
@@ -20,6 +26,7 @@ import os
 import platform
 import statistics as stt
 import subprocess
+import sys
 import time
 
 import mlx.core as mx
@@ -29,6 +36,10 @@ from mlx_lm.models.cache import make_prompt_cache
 import locals as L
 from locals import kernels as K
 from locals.runtime import Runtime
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+import timing_setup as TS  # noqa: E402  (docs/measurements/timing_setup.py)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("model")
@@ -43,6 +54,7 @@ for spec in a.force:
     if not (eq and fam and M.isdigit() and int(M) > 0):
         raise SystemExit(f"--force {spec}: expected M=FAMILY or M@NxK=FAMILY")
     forces.append((spec, int(M), only, fam))
+busy = TS.BusyMarker().start()
 
 repo = os.path.dirname(os.path.dirname(L.__file__))
 commit = subprocess.run(["git", "-C", repo, "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
@@ -51,7 +63,9 @@ dirty = subprocess.run(["git", "-C", repo, "status", "--porcelain", "--", "local
 dev = mx.device_info()
 setup = {"mac": f"{dev['device_name']} ({dev['architecture']}, {dev['memory_size'] >> 30} GB)", "macos": platform.mac_ver()[0],
          "mlx": mx.__version__, "mlx_lm": mlx_lm.__version__, "commit": commit + (" with changes in locals/" if dirty else ""),
-         "model": a.model, "tune_cache": K._TUNE_PATH, "preset": K._preset_path(), "force": a.force}
+         "model": a.model, "tune_cache": K._TUNE_PATH, "preset": K._preset_path(), "force": a.force, "method": "issue-25",
+         "scripts": TS.script_hashes(__file__, os.path.join(HERE, "summarize.py"), TS.__file__),
+         "servers_at_start": TS.server_pids()}
 for k, v in setup.items():
     print(f"{k}: {v}", flush=True)
 
@@ -61,17 +75,12 @@ tune = K._load_tune()
 print(f"tune cache says mlx {tune.get('__mlx__')}, {len(tune.get('__stale__') or [])} stale shapes", flush=True)
 setup["tune_cache_mlx"] = tune.get("__mlx__")
 
-# (N, K, dtype name) -> the layers. The dtype is the one K._choose keys a choice on: the activations' (Runtime's compute
-# dtype), not the scales'
+# (N, K, dtype name) -> the layers. The dtype is the one warm-up and K._choose key a choice on (K._mod_dt: the
+# activations' dtype, Runtime's compute dtype)
 shapes = {}
 for name, mod in model.named_modules():
     if K._tunable(mod):
-        shapes.setdefault((mod["weight"].shape[0], mod["weight"].shape[1] * 8, K._key_dt(rt.dtype, mod)), []).append(name)
-
-
-def key(N, Kd, M, dt):
-    return f"{N}x{Kd}x{M}" + ("" if dt == "float16" else f"x{dt}")
-
+        shapes.setdefault((mod["weight"].shape[0], mod["weight"].shape[1] * 8, K._mod_dt(mod)), []).append(name)
 
 for spec, M, only, fam in forces:
     hit = [(N, Kd, dt) for N, Kd, dt in shapes if not only or only == f"{N}x{Kd}"]
@@ -79,9 +88,9 @@ for spec, M, only, fam in forces:
         raise SystemExit(f"--force {spec}: no 4-bit matmul shape {only}; the shapes are "
                          + ", ".join(sorted({f"{N}x{Kd}" for N, Kd, _ in shapes})))
     for N, Kd, dt in hit:
-        c = ("mlx",) if fam == "mlx" else tune.get(key(N, Kd, M, dt) + "|" + fam)
+        c = ("mlx",) if fam == "mlx" else tune.get(K._tune_key(N, Kd, M, dt) + "|" + fam)
         if c is None:
-            raise SystemExit(f"--force {spec}: no tuned {fam} kernel for {key(N, Kd, M, dt)}")
+            raise SystemExit(f"--force {spec}: no tuned {fam} kernel for {K._tune_key(N, Kd, M, dt)}")
         K._CHOICE[(N, Kd, M, dt)] = tuple(c)
 
 # the kernel each matmul shape has at 1, 2 and 3 rows. Runtime.load's warm-up has already chosen them (K._CHOICE) for
@@ -139,80 +148,102 @@ def probe(n=30):
 
 
 def sync(S, n=30):
+    """(ms a step, the probe right before the timed steps, the probe right after them)"""
     c, x = filled(S)
-    t = time.perf_counter()
-    for _ in range(n):
-        mx.eval(model(x, cache=c))
-    return (time.perf_counter() - t) / n * 1e3
+    with busy.quiet():
+        before = probe()
+        t = time.perf_counter()
+        for _ in range(n):
+            mx.eval(model(x, cache=c))
+        ms = (time.perf_counter() - t) / n * 1e3
+        return ms, before, probe()
 
 
 def split(S, n=30):
     c, x = filled(S)
     parts = [[], [], []]
-    for _ in range(n):
-        t0 = time.perf_counter()
-        y = model(x, cache=c)
-        t1 = time.perf_counter()
-        mx.async_eval(y)
-        t2 = time.perf_counter()
-        mx.eval(y)
-        t3 = time.perf_counter()
-        for p, v in zip(parts, (t1 - t0, t2 - t1, t3 - t2)):
-            p.append(v * 1e3)
+    with busy.quiet():
+        for _ in range(n):
+            t0 = time.perf_counter()
+            y = model(x, cache=c)
+            t1 = time.perf_counter()
+            mx.async_eval(y)
+            t2 = time.perf_counter()
+            mx.eval(y)
+            t3 = time.perf_counter()
+            for p, v in zip(parts, (t1 - t0, t2 - t1, t3 - t2)):
+                p.append(v * 1e3)
     return [stt.median(p) for p in parts]
 
 
 def pipelined(S, n=30):
+    """n steps, each built and queued while the one before runs; the first is queued before the timer starts, so
+    no build is left in the open"""
     c, x = filled(S)
-    y = model(x, cache=c)
-    mx.eval(y)
-    t = time.perf_counter()
-    for _ in range(n):
-        y2 = model(x, cache=c)
-        mx.async_eval(y2)
+    mx.eval(model(x, cache=c))
+    with busy.quiet():
+        y = model(x, cache=c)
+        mx.async_eval(y)
+        t = time.perf_counter()
+        for _ in range(n - 1):
+            y2 = model(x, cache=c)
+            mx.async_eval(y2)
+            mx.eval(y)
+            y = y2
         mx.eval(y)
-        y = y2
-    mx.eval(y)
-    return (time.perf_counter() - t) / n * 1e3
+        return (time.perf_counter() - t) / n * 1e3
 
 
 sync(1)  # (warm)
-STEPS = {"1_first": 1, "2": 2, "3": 3, "1_last": 1}  # a round's sync measurements, in order: JSON key -> tokens
+PASSES = (1, 2, 3)
 rounds = []
 t_start = time.perf_counter()
 for r in range(a.rounds):
     t_round = time.perf_counter() - t_start
-    s, pr = {}, {}
-    for k, S in STEPS.items():
-        pr[k] = probe()
-        s[k] = sync(S)
-    sp = {S: split(int(S)) for S in ("1", "2", "3")}
-    pp = {S: pipelined(int(S)) for S in ("1", "2", "3")}
-    rounds.append({"t_s": t_round, "sync": s, "probe_before_sync": pr, "split": sp, "pipelined": pp})
-    print(f"round {r} (t={t_round:.0f} s): sync " + ", ".join(f"S={STEPS[k]} {v:.2f}" for k, v in s.items())
-          + " ms | probe before each " + ", ".join(f"{v:.3f}" for v in pr.values()) + " ms | split (build + encode + wait) "
+    order = PASSES[r % 3:] + PASSES[:r % 3]  # 1 2 3, 2 3 1, 3 1 2, ...
+    sy = []
+    for S in order + order[::-1]:
+        ms, before, after = sync(S)
+        sy.append({"S": S, "ms": ms, "probe_before": before, "probe_after": after})
+    sp = {str(S): split(S) for S in order}
+    pp = {str(S): pipelined(S) for S in order}
+    rounds.append({"t_s": t_round, "order": list(order), "sync": sy, "split": sp, "pipelined": pp})
+    print(f"round {r} (t={t_round:.0f} s, order {' '.join(map(str, order))}): sync "
+          + ", ".join(f"S={m['S']} {m['ms']:.2f}" for m in sy)
+          + " ms | probe before, after each " + ", ".join(f"{m['probe_before']:.3f} {m['probe_after']:.3f}" for m in sy)
+          + " ms | split (build + encode + wait) "
           + ", ".join(f"S={S} {b:.2f}+{e:.2f}+{w:.2f}" for S, (b, e, w) in sp.items())
           + " | pipelined " + ", ".join(f"S={S} {v:.2f}" for S, v in pp.items()), flush=True)
+busy.stop()
+setup["servers_at_end"] = TS.server_pids()
+print(f"Locals servers: at the start {setup['servers_at_start'] or 'none'}, at the end {setup['servers_at_end'] or 'none'}",
+      flush=True)
 
 
 def summary(vals):
     return {"mean": stt.mean(vals), "min": min(vals), "max": max(vals)}
 
 
+def per_round(mode, S):
+    """S's value in each round: sync, the mean of its two measurements; pipelined, its one"""
+    if mode == "pipelined":
+        return [r["pipelined"][str(S)] for r in rounds]
+    return [stt.mean(m["ms"] for m in r["sync"] if m["S"] == S) for r in rounds]
+
+
 out = {"setup": setup, "cache_tokens": int(ids.shape[1]), "choices": choices, "rounds": rounds, "summary": {}}
-one = {"sync": [min(r["sync"]["1_first"], r["sync"]["1_last"]) for r in rounds],  # S=1 per round
-       "pipelined": [r["pipelined"]["1"] for r in rounds]}
-print(f"\nover {a.rounds} rounds: mean (min to max), ms; ratio = mean / mean of S=1", flush=True)
+print(f"\nover {a.rounds} rounds: mean (min to max), ms; ratio = mean / mean of S=1; sync: per round, the mean of "
+      f"each pass's two measurements", flush=True)
 for mode in ("sync", "pipelined"):
-    base = stt.mean(one[mode])
-    for S in ("1", "2", "3"):
-        sm = summary(one[mode] if S == "1" else [r[mode][S] for r in rounds])
+    base = stt.mean(per_round(mode, 1))
+    for S in PASSES:
+        sm = summary(per_round(mode, S))
         sm["ratio"] = sm["mean"] / base
         out["summary"][f"{mode}_S{S}"] = sm
-        print(f"  {mode:9s} S={S}: {sm['mean']:.2f} ({sm['min']:.2f} to {sm['max']:.2f}), {sm['ratio']:.2f}x"
-              + (" (S=1: the lower of first and last each round)" if mode == "sync" and S == "1" else ""), flush=True)
-pv = [v for r in rounds for v in r["probe_before_sync"].values()]
+        print(f"  {mode:9s} S={S}: {sm['mean']:.2f} ({sm['min']:.2f} to {sm['max']:.2f}), {sm['ratio']:.2f}x", flush=True)
+pv = [m[k] for r in rounds for m in r["sync"] for k in ("probe_before", "probe_after")]
 pm = out["summary"]["probe"] = summary(pv)
-print(f"  probe: {pm['mean']:.3f} ({pm['min']:.3f} to {pm['max']:.3f}) ms", flush=True)
+print(f"  probe (before and after each sync measurement): {pm['mean']:.3f} ({pm['min']:.3f} to {pm['max']:.3f}) ms",
+      flush=True)
 with open(a.out, "w") as f:
     json.dump(out, f, indent=1)

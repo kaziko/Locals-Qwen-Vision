@@ -56,12 +56,12 @@ def patch(model, dtype: Optional[str] = "auto", fuse: bool = True, kernels: bool
     from .kernels import enable_small_m, tune_model
     from .runtime import set_compute_dtype
 
-    set_compute_dtype(model, dtype)
+    dtype = set_compute_dtype(model, dtype)
     if fuse:
         fuse_model(model)
     enable_small_m(kernels, model)
     if kernels:
-        tune_model(model, mode=tune or os.environ.get("LOCALS_TUNE", "auto"), log=log)
+        tune_model(model, mode=tune or os.environ.get("LOCALS_TUNE", "auto"), log=log, dtype=dtype)
     mx.set_wired_limit(mx.device_info()["max_recommended_working_set_size"])
     return model
 

@@ -269,7 +269,7 @@ class Runtime:
         if small_m_kernel:
             from .kernels import tune_model
 
-            tune_model(model, mode=tune or os.environ.get("LOCALS_TUNE", "auto"), log=log)
+            tune_model(model, mode=tune or os.environ.get("LOCALS_TUNE", "auto"), log=log, dtype=self.dtype)
         mx.set_wired_limit(mx.device_info()["max_recommended_working_set_size"])
         hf = tokenizer._tokenizer
         body = getattr(text_model(model), "model", None)
