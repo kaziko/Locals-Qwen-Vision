@@ -67,6 +67,36 @@ average (1.153 to 2.883). The slowest probe (2.883 ms) came right after round 0'
 method had no probe after the timed steps, so it could not have seen this. No sync measurement was more than 1.10x
 its run's median.
 
+### Three full runs of the new method
+
+Zwyrol, commit `d0cc5b9`, the same Mac and `.venv`, 2026-11-08. Three runs of 6 rounds, one after the other, with
+the first command of "Commands" below and `--rounds 6`. The tuning file was copied again from
+`~/.cache/locals/tune_v6_applegpu_g14s.json` (last changed 2026-11-06 22:05). The
+model came from a Hugging Face cache on another disk (`HF_HOME`), because the default cache no longer held it. The
+results are `results/method25/full6_1` to `_3`. In each, `servers_at_start` and `servers_at_end` are empty, the
+rounds ran in the orders 1 2 3, 2 3 1, 3 1 2, 1 2 3, 2 3 1, 3 1 2, and each pass was timed twice in each round.
+
+A first set of three runs, made about 35 minutes earlier, is not kept. While it ran, ComfyUI and other programs were busy on
+this Mac. 28 of its 108 sync measurements had a slow probe, and in each of its runs the pipelined 2-token pass came
+out faster than the 1-token pass. During the kept runs, a Hermes agent process still used about half of one CPU core
+(`ps`, before and after the runs).
+
+From `summarize.py results/method25/full6_*.json`:
+
+| Run | sync S=1, S=2, S=3 (ms) | sync 2 / 1 | pipelined S=1, S=2, S=3 (ms) | pipelined 2 / 1 | probe (ms) |
+|---|---|---|---|---|---|
+| `full6_1` | 10.20, 12.33, 15.68 | 1.21x | 7.62, 8.77, 11.68 | 1.15x | 1.154 (1.088 to 1.511) |
+| `full6_2` | 10.30, 12.06, 15.55 | 1.17x | 7.70, 8.74, 11.81 | 1.14x | 1.139 (1.106 to 1.377) |
+| `full6_3` | 10.24, 12.11, 15.63 | 1.18x | 7.65, 8.72, 11.70 | 1.14x | 1.164 (1.104 to 1.754) |
+
+Over the 108 sync measurements, 6 had a slow probe (more than 1.25x its median), and none of those 6 was more than
+1.1x its run's median. One measurement was more than 1.1x its run's median (`full6_1`, 1 token, 1.13x), with a
+probe that was not slow.
+
+So with the new method, a 2-token pass on Zwyrol costs 1.17x to 1.21x of a 1-token pass in sync, and 1.14x to 1.15x
+pipelined. The sync ratio did not come down from the old method's 1.17x to 1.19x. Issue #25 item 1 expected about
+1.16x to 1.18x for Zwyrol (the old `unchanged_1` to `_3`, with the mean of the two 1-token values).
+
 ## What the scripts did in these runs (the old method)
 
 `step_timing.py` loads the model with `Runtime.load` (as `mtp_test.py` does), prints the kernel each 4-bit matmul shape

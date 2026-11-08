@@ -28,7 +28,12 @@ position i and the embedding of token i+1, it predicts token i+2. The 4-bit MLX 
   Zwyrol at commit `936c6c0`, is in `results/method25/`: main steps 11.05, 12.80 and 16.35 ms for 1, 2 and 3 tokens
   (the mean of each pass's two), and no Locals server at the start or at the end. The command was the Zwyrol line
   below, with the output in `<scratch>/runs/mtp_method25_1.json` and `LOCALS_TUNE_CACHE` set to the copy that
-  `../two-token-pass/README.md` describes.
+  `../two-token-pass/README.md` describes. A second run, at commit `d0cc5b9` on 2026-11-08, right after the three
+  full `step_timing.py` runs ("Three full runs of the new method" there, with the same setup), is
+  `results/method25/full_1`: main steps 10.10, 12.45 and 15.81 ms (2 / 1: 1.23x). Its two 2-token values were 11.91
+  and 13.00 ms, and this script has no probe, so its 2 / 1 is less sure than `step_timing.py`'s. The 4-bit MTP guess
+  took 1.58 ms, 0.16 of a main step: estimate 1.32x with 1 draft, 1.30x with 2 (with 4-bit acceptance, before the
+  pipelining loss).
 
 ## Commands
 
