@@ -4,8 +4,10 @@ on this Mac). Ten prompts get a greedy reply (no thinking); then, teacher-forced
 gets (hidden state at i, embedding of token i+1) and predicts token i+2. A guess counts when it equals the main
 model's own greedy token there. Variants settle what the checkpoint does not say: the hidden state before or after
 the final norm, the order of the concatenation, and the norm weights stored as w or as 1+w.
+While it runs, other Locals processes see the GPU as busy (timing_setup.BusyMarker: a server's idle tuner waits);
+the result's setup holds the scripts' hashes and the Locals servers running at the start and at the end.
 Usage: mtp_test.py MTP.safetensors OUT.json"""
-import json, sys, time
+import json, os, statistics as stt, sys, time
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -14,6 +16,13 @@ from locals.runtime import Runtime
 from mlx_lm.models.base import create_attention_mask, create_ssm_mask
 from mlx_lm.models.cache import KVCache, make_prompt_cache
 from mlx_lm.models.qwen3_5 import DecoderLayer
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import timing_setup as TS  # docs/measurements/timing_setup.py
+
+busy = TS.BusyMarker().start()
+setup = {"mlx": mx.__version__, "locals": L.__file__, "scripts": TS.script_hashes(__file__, TS.__file__),
+         "servers_at_start": TS.server_pids()}
 
 print("locals from", L.__file__, "| mlx", mx.__version__, flush=True)
 MODEL = sys.argv[3] if len(sys.argv) > 3 else "mlx-community/Qwen3.5-4B-MLX-4bit"
@@ -133,7 +142,7 @@ def accept(m, which, hid_first, depth2=False):
                 if ok1[i]: n2 += 1; c2 += int(g2[i] == toks[i + 3])
     return c1, n1, per, c2, n2
 
-res = {"variants": {}}
+res = {"setup": setup, "variants": {}}
 for plus1 in (True, False):
     m = make_mtp(plus1)
     for which in ("pre", "post"):
@@ -158,19 +167,25 @@ def tm_step(S, n=30):
     cache = make_prompt_cache(model); mx.eval(model(feats[0][1], cache=cache))
     x = mx.array([[feats[0][1][0, 5].item()] * S])
     for _ in range(3): mx.eval(model(x, cache=cache))
-    t = time.perf_counter()
-    for _ in range(n): mx.eval(model(x, cache=cache))
-    return (time.perf_counter() - t) / n
+    with busy.quiet():
+        t = time.perf_counter()
+        for _ in range(n): mx.eval(model(x, cache=cache))
+        return (time.perf_counter() - t) / n
 def mtp_step(m, n=30):
     c = KVCache(); hid = feats[0][4][:, :1]; e = tm.embed_tokens(feats[0][1][:, :1])
     for _ in range(3): mx.eval(mx.argmax(mtp_forward(m, hid, e, hid_first, c)[1], axis=-1))
-    t = time.perf_counter()
-    for _ in range(n): mx.eval(mx.argmax(mtp_forward(m, hid, e, hid_first, c)[1], axis=-1))
-    return (time.perf_counter() - t) / n
-runs = [(S, tm_step(S)) for S in (1, 2, 3, 1)]  # S=1 twice, first and last: the noise floor
+    with busy.quiet():
+        t = time.perf_counter()
+        for _ in range(n): mx.eval(mx.argmax(mtp_forward(m, hid, e, hid_first, c)[1], axis=-1))
+        return (time.perf_counter() - t) / n
+# every main step twice, forward and back (issue #25): the same count and the same statistic (the mean of the two)
+# for each, and a drift over the six reaches each alike
+ORDER = (1, 2, 3, 3, 2, 1)
+runs = [(S, tm_step(S)) for S in ORDER]
 print(f"\nmain step: " + ", ".join(f"S={S} {v * 1e3:.2f} ms" for S, v in runs), flush=True)
-steps = {2: runs[1][1], 3: runs[2][1]}; s1 = min(runs[0][1], runs[3][1])
-res["timing_ms"] = {"main_S1_first": runs[0][1] * 1e3, "main_S2": runs[1][1] * 1e3, "main_S3": runs[2][1] * 1e3, "main_S1_last": runs[3][1] * 1e3}
+steps = {S: stt.mean(v for k, v in runs if k == S) for S in (1, 2, 3)}; s1 = steps[1]
+res["timing_ms"] = {"main_order": list(ORDER), "main_ms": [v * 1e3 for _, v in runs],
+                    **{f"main_S{S}": v * 1e3 for S, v in steps.items()}}
 a1 = res["4-bit"]["a1"]; a2 = res["4-bit"]["a2_given_a1"]
 for bits in (None, 4):
     m = make_mtp(plus1, bits); c = mtp_step(m); lab = "4-bit" if bits else "float16"
@@ -179,4 +194,5 @@ for bits in (None, 4):
     k1 = (1 + a1) / (r2 + cc); k2 = (1 + a1 + a1 * a2) / (r3 + 2 * cc)
     print(f"MTP {lab} guess: {c * 1e3:.2f} ms = {cc:.2f} of a main step | estimate, 1 draft: {k1:.2f}x, 2 drafts: {k2:.2f}x "
           f"(with 4-bit acceptance; before the pipelining loss)", flush=True)
+TS.end_of_run(busy, setup)
 json.dump(res, open(sys.argv[2], "w"), indent=1)

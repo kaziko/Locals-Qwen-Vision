@@ -235,8 +235,22 @@ def _key_dt(dt: str, mod) -> str:
     return dt + "flint" if vars(mod).get("_locals_direct") else dt
 
 
+def _tune_key(N: int, K: int, M, dt: str) -> str:
+    """A matmul shape's key in the tuning file: ``NxKxM``, then ``x`` and the key's dtype name (_key_dt) unless it
+    is float16. ``M`` is a row count, or ``"P"`` for how prompts are read (_prefill_key)."""
+    return f"{N}x{K}x{M}" + ("" if dt == "float16" else f"x{dt}")
+
+
+def _act_dtype(mod):
+    """The dtype of the activations a layer is given in decode: the model's compute dtype, which tune_model records
+    on each layer (Runtime.load's set_compute_dtype), else its scales' dtype. _choose keys on the input it is given,
+    so warm-up and tuning build their inputs in this dtype: a model whose scales and activations differ gets the
+    choices decode reads (issue #25)."""
+    return vars(mod).get("_locals_act_dtype") or mod["scales"].dtype
+
+
 def _mod_dt(mod) -> str:
-    return _key_dt(str(mod["scales"].dtype).split(".")[-1], mod)
+    return _key_dt(str(_act_dtype(mod)).split(".")[-1], mod)
 
 
 def _missing_family(tune: dict, key: str) -> bool:
@@ -661,7 +675,7 @@ def _choose(x2, mod):
     c = _CHOICE.get((N, K, M, kd))
     if c is not None and not _RETIME:  # (the path of every call once chosen: no lock, no lookups)
         return c
-    key = f"{N}x{K}x{M}" + ("" if kd == "float16" else f"x{kd}")
+    key = _tune_key(N, K, M, kd)
     tune = _load_tune()
     if c is not None and not _is_stale(tune, key):
         return c
@@ -842,7 +856,7 @@ def _pad_rows(N: int, K: int, M: int, dt: str) -> int:
         times = tune.get("__times__", {})
 
         def t(m):
-            k = f"{N}x{K}x{m}" + ("" if dt == "float16" else f"x{dt}")
+            k = _tune_key(N, K, m, dt)
             c, tt = tune.get(k), times.get(k)
             return tt.get(c[0], tt.get("mlx")) if c is not None and tt else None
 
@@ -928,7 +942,7 @@ def _dense_ok(x, mod) -> bool:
 
 
 def _prefill_key(N: int, K: int, dt: str) -> str:
-    return f"{N}x{K}xP" + ("" if dt == "float16" else f"x{dt}")
+    return _tune_key(N, K, "P", dt)
 
 
 def _dense_prefill(mod, dtype) -> bool:
@@ -1298,7 +1312,7 @@ def model_tune(model, ms=range(2, MAX_M + 1), families=("v3", "multi", "fragh", 
     for M in ms:
         if M in done:
             continue
-        keys = {(N, K, dt): f"{N}x{K}x{M}" + ("" if dt == "float16" else f"x{dt}") for N, K, dt in shapes}
+        keys = {(N, K, dt): _tune_key(N, K, M, dt) for N, K, dt in shapes}
         if not all(k in tune for k in keys.values()):
             continue
         base = {sk: tuple(tune[k]) for sk, k in keys.items()}
@@ -1363,7 +1377,7 @@ def warmup(model, ms=range(1, 9)) -> int:
         if not _tunable(mod):
             continue
         N, K = mod["weight"].shape[0], mod["weight"].shape[1] * 8
-        dt = mod["scales"].dtype
+        dt = _act_dtype(mod)
         for M in ms:
             x = mx.zeros((M, K), dt)
             c = _choose(x, mod)
@@ -1395,12 +1409,12 @@ def pretune(model, max_m: int = MAX_M, log=None) -> int:
             if (N, K) in seen or K % 64:
                 continue
             seen.add((N, K))
-            dt = mod["scales"].dtype
+            dt = _act_dtype(mod)
             name = str(dt).split(".")[-1]
             kd = _mod_dt(mod)
             stale = set(tune.get("__stale__") or ())
             for M in range(MIN_M, max_m + 1):
-                key = f"{N}x{K}x{M}" + ("" if kd == "float16" else f"x{kd}")
+                key = _tune_key(N, K, M, kd)
                 work.append((mod, M, K, dt, key not in tune or key in stale or _missing_family(tune, key)))
             if N * K <= DENSE_MAX:  # how prompts are read through it (_dense_prefill)
                 key = _prefill_key(N, K, name)
@@ -1436,11 +1450,11 @@ def pending_work(model, max_m: int = 16) -> list:
             if (N, K) in seen or K % 64:
                 continue
             seen.add((N, K))
-            name = str(mod["scales"].dtype).split(".")[-1]
+            name = str(_act_dtype(mod)).split(".")[-1]
             kd = _mod_dt(mod)
             stale = set(tune.get("__stale__") or ())
             for M in range(MIN_M, max_m + 1):
-                key = f"{N}x{K}x{M}" + ("" if kd == "float16" else f"x{kd}")
+                key = _tune_key(N, K, M, kd)
                 if key not in tune or key in stale or _missing_family(tune, key):
                     work.append((mod, M))
             if N * K <= DENSE_MAX and (_prefill_key(N, K, name) not in tune or _prefill_key(N, K, name) in stale):
@@ -1454,9 +1468,9 @@ def tune_one(mod, M: int) -> tuple:
     _TUNING = _RETIME = True
     try:
         if M >= PREFILL_M:
-            return ("dense",) if _dense_prefill(mod, mod["scales"].dtype) else ("mlx",)
+            return ("dense",) if _dense_prefill(mod, _act_dtype(mod)) else ("mlx",)
         K = mod["weight"].shape[1] * 8
-        return _choose(mx.zeros((M, K), mod["scales"].dtype), mod)
+        return _choose(mx.zeros((M, K), _act_dtype(mod)), mod)
     finally:
         _TUNING = _RETIME = False
 
@@ -1475,7 +1489,7 @@ def tune_pending(model, max_m: int = MAX_M) -> int:
             seen.add((N, K))
             dt = _mod_dt(mod)
             for M in range(MIN_M, max_m + 1):
-                key = f"{N}x{K}x{M}" + ("" if dt == "float16" else f"x{dt}")
+                key = _tune_key(N, K, M, dt)
                 missing += key not in tune
     return missing
 
@@ -1503,7 +1517,7 @@ def tune_report(model) -> str:
         t_mlx = t_ch = t_own = 0.0
         fams, timed = Counter(), 0
         for (N, K, dt), n in shapes.items():
-            key = f"{N}x{K}x{M}" + ("" if dt == "float16" else f"x{dt}")
+            key = _tune_key(N, K, M, dt)
             t, c = times.get(key), tune.get(key)
             if not t or "mlx" not in t or c is None:
                 continue
@@ -1543,7 +1557,7 @@ def tune_report(model) -> str:
     return "\n".join(out)
 
 
-def tune_model(model, mode: str = "auto", log=None) -> dict:
+def tune_model(model, mode: str = "auto", log=None, dtype: Optional[str] = None) -> dict:
     """The one-time kernel autotuning a loaded model goes through.
 
     ``"auto"``: if the cache or a shipped preset already covers the model, do
@@ -1552,8 +1566,16 @@ def tune_model(model, mode: str = "auto", log=None) -> dict:
     (a few minutes). ``"full"``: every shape up to 32 rows plus whole-step
     timing per batch size (10--20 minutes; the best batched throughput).
     ``"off"``: nothing ahead of time (untuned shapes are tuned on first use).
-    Results are cached in ``~/.cache/locals`` (or ``$LOCALS_TUNE_CACHE``)."""
+    Results are cached in ``~/.cache/locals`` (or ``$LOCALS_TUNE_CACHE``). ``dtype``: the model's compute dtype
+    (set_compute_dtype's), recorded on each layer (_act_dtype); without it, a layer's scales' dtype stands in."""
     import sys as _sys
+
+    # (a layer with float32 scales keeps its own dtype: set_compute_dtype says "float16" for any model without bf16
+    # arrays, and leaves those arrays as they are)
+    if dtype in ("float16", "bfloat16"):
+        for _, mod in model.named_modules():
+            if _tunable(mod) and mod["scales"].dtype in (mx.float16, mx.bfloat16):
+                object.__setattr__(mod, "_locals_act_dtype", getattr(mx, dtype))
 
     log = log or (lambda s: print(s, file=_sys.stderr, flush=True))
     mode = (mode or "auto").lower()

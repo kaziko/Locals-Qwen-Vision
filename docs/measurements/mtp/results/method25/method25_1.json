@@ -1,0 +1,81 @@
+{
+ "setup": {
+  "mlx": "0.32.3",
+  "locals": "<repo>/locals/__init__.py",
+  "scripts": {
+   "mtp_test.py": "5336a4b6a0a3460b80bed81140e14e82495ef8081d441865983eec1deb054f58",
+   "timing_setup.py": "488d4541121a365d3e45a50802ede910a5b04b053559ecf7bb964fa6768a6bfd"
+  },
+  "servers_at_start": [],
+  "servers_at_end": []
+ },
+ "variants": {
+  "norm 1+w | hidden pre-norm | concat [emb, hidden]": 0.8200862600123229,
+  "norm 1+w | hidden pre-norm | concat [hidden, emb]": 0.0024645717806531116,
+  "norm 1+w | hidden post-norm | concat [emb, hidden]": 0.8367221195317314,
+  "norm 1+w | hidden post-norm | concat [hidden, emb]": 0.0024645717806531116,
+  "norm w | hidden pre-norm | concat [emb, hidden]": 0.0,
+  "norm w | hidden pre-norm | concat [hidden, emb]": 0.0012322858903265558,
+  "norm w | hidden post-norm | concat [emb, hidden]": 0.0,
+  "norm w | hidden post-norm | concat [hidden, emb]": 0.0006161429451632779
+ },
+ "float16": {
+  "a1": 0.8367221195317314,
+  "a2_given_a1": 0.7498144023756496,
+  "per_prompt": {
+   "en-explain": 0.7338129496402878,
+   "code": 0.8691099476439791,
+   "pl-email": 0.7266666666666667,
+   "pl-explain": 0.6963350785340314,
+   "json": 0.9132947976878613,
+   "summary": 0.7755102040816326,
+   "math": 0.9581151832460733,
+   "code-convert": 0.8900523560209425,
+   "tool-call": 1.0,
+   "chat": 0.8167539267015707,
+   "pl-tool-screen": 0.9333333333333333,
+   "pl-tool-note": 0.9743589743589743
+  }
+ },
+ "4-bit": {
+  "a1": 0.8274799753542822,
+  "a2_given_a1": 0.734984984984985,
+  "per_prompt": {
+   "en-explain": 0.7122302158273381,
+   "code": 0.8691099476439791,
+   "pl-email": 0.74,
+   "pl-explain": 0.6544502617801047,
+   "json": 0.9190751445086706,
+   "summary": 0.7346938775510204,
+   "math": 0.9528795811518325,
+   "code-convert": 0.8795811518324608,
+   "tool-call": 0.9743589743589743,
+   "chat": 0.8219895287958116,
+   "pl-tool-screen": 0.9333333333333333,
+   "pl-tool-note": 0.9743589743589743
+  }
+ },
+ "timing_ms": {
+  "main_order": [
+   1,
+   2,
+   3,
+   3,
+   2,
+   1
+  ],
+  "main_ms": [
+   10.690173632853353,
+   12.935047233865287,
+   16.64465416688472,
+   16.064161101045705,
+   12.67412636661902,
+   11.40371109941043
+  ],
+  "main_S1": 11.046942366131892,
+  "main_S2": 12.804586800242154,
+  "main_S3": 16.354407633965216,
+  "mtp_float16": 2.207723599470531,
+  "mtp_4-bit": 2.5940847350284457
+ }
+}

@@ -13,7 +13,91 @@ record it). Every run read a copy of this Mac's kernel-tuning file (`LOCALS_TUNE
 real one. That file has no entry for Qwen3.5-4B's matmul shapes, so every kernel choice came from the preset shipped
 for this GPU architecture (`locals/presets/tune_v6_applegpu_g14s.json`), the same as without the copy.
 
-## What the scripts do
+Every number in this file comes from the old method (issue #22), described under "What the scripts did in these
+runs". `step_timing.py` now times differently (issue #25, next section); its old version made every committed result.
+
+## The method since issue #25
+
+A review of these runs ([issue #25](https://github.com/kaziko/Locals-Qwen-Vision/issues/25)) found gaps in the old
+method. `step_timing.py` now works like this. The old result files stay as they were, and `summarize.py` reads both
+kinds and prints the same tables for the old ones.
+
+- **The same count and statistic for every pass.** The old method timed 1 token twice a round and took the lower
+  value, but timed 2 and 3 tokens once each. That pushes the 2 / 1 ratio up: the issue puts the README's 1.17x to
+  1.19x at about 1.13x to 1.18x with the mean of the two. Now each round times the passes forward and back (for
+  example 1 2 3 3 2 1). Each pass is timed twice, and a round counts the mean of the two.
+- **The order rotates.** The first pass is 1 token in round 0, 2 in round 1, 3 in round 2, and so on. Each round
+  records its order (`order`). Then an order effect shows as a difference between rounds, not as noise. The
+  default is now 6 rounds (it was 5), so each pass goes first equally often.
+- **The probe brackets the timed steps.** It runs right before the 30 timed steps (after the fresh cache and the
+  warm steps) and right after them (`probe_before`, `probe_after`). `summarize.py` counts the slower of the two.
+- **No build is left out of the pipeline.** `pipelined` builds and queues its first timed step before the timer
+  starts. Each of the other 29 builds overlaps the step before it on the GPU. The old method left the first build outside the pipeline: about 0.04 to
+  0.07 ms a step, the issue's estimate from `split`.
+- **The run marks the GPU busy.** While it runs, other Locals processes see it as busy (`kernels.others_busy()`), so
+  a server's idle tuner does not time kernels during a measurement. The mark comes from a thread once a second,
+  and not inside a timed section (`timing_setup.BusyMarker` in `..`).
+- **The result says what made it.** `setup` holds the sha256 of `step_timing.py`, `summarize.py` and
+  `timing_setup.py` (`scripts`). It also holds the Locals servers found at the start and at the end of the run
+  (`servers_at_start`, `servers_at_end`: `locals.app`'s check, any port, any install). A server in either list was
+  running at that moment, idle or not. A server that started and stopped during the run is in neither list.
+- **One tune-key helper.** `--force` builds its keys with `kernels._tune_key`, as `kernels.py` does everywhere,
+  and takes their dtype from `kernels._mod_dt`: the activations' dtype (the compute dtype `Runtime.load` records on
+  each layer). Warm-up now builds its inputs in that dtype too, and `kernels._choose` keys on its input's dtype, so
+  a model whose scales and activations differ gets the warm-up choices that decode reads.
+
+`mtp_test.py` in `../mtp` times its main steps the same way (1 2 3 3 2 1, the mean of each pass's two). It marks
+the GPU busy too, and records the same `setup`. It has no probe.
+
+### A first run of the new method
+
+This run checks that the new method works and writes every field. It is not a new measurement for #22: it has only
+3 rounds. Zwyrol, commit `936c6c0`, the same Mac, `.venv` and tuning-file copy as above, 2026-11-07. Command, with
+the environment of "Commands" below:
+
+```
+<repo>/.venv/bin/python step_timing.py Kaziko/Qwen3.5-4B-Zwyrol <scratch>/runs/method25_1.json --rounds 3 > <scratch>/runs/method25_1.txt 2>&1
+```
+
+The result is in `results/method25/` (a folder of its own, so `summarize.py results/*.json` prints what it printed
+before). `servers_at_start` and `servers_at_end` are both empty. The rounds ran in the orders 1 2 3, 2 3 1 and
+3 1 2, and each pass was timed twice in each round. From `summarize.py results/method25/*.json`: sync 10.89, 12.94 and
+16.37 ms for 1, 2 and 3 tokens (2 / 1: 1.19x); pipelined 8.16, 9.25 and 12.30 ms (1.13x); the probe 1.258 ms on
+average (1.153 to 2.883). The slowest probe (2.883 ms) came right after round 0's first 1-token measurement. The old
+method had no probe after the timed steps, so it could not have seen this. No sync measurement was more than 1.10x
+its run's median.
+
+### Three full runs of the new method
+
+Zwyrol, commit `d0cc5b9`, the same Mac and `.venv`, 2026-11-08. Three runs of 6 rounds, one after the other, with
+the first command of "Commands" below and `--rounds 6`. The tuning file was copied again from
+`~/.cache/locals/tune_v6_applegpu_g14s.json` (last changed 2026-11-06 22:05). The
+model came from a Hugging Face cache on another disk (`HF_HOME`), because the default cache no longer held it. The
+results are `results/method25/full6_1` to `_3`. In each, `servers_at_start` and `servers_at_end` are empty, the
+rounds ran in the orders 1 2 3, 2 3 1, 3 1 2, 1 2 3, 2 3 1, 3 1 2, and each pass was timed twice in each round.
+
+A first set of three runs, made about 35 minutes earlier, is not kept. While it ran, ComfyUI and other programs were busy on
+this Mac. 28 of its 108 sync measurements had a slow probe, and in each of its runs the pipelined 2-token pass came
+out faster than the 1-token pass. During the kept runs, a Hermes agent process still used about half of one CPU core
+(`ps`, before and after the runs).
+
+From `summarize.py results/method25/full6_*.json`:
+
+| Run | sync S=1, S=2, S=3 (ms) | sync 2 / 1 | pipelined S=1, S=2, S=3 (ms) | pipelined 2 / 1 | probe (ms) |
+|---|---|---|---|---|---|
+| `full6_1` | 10.20, 12.33, 15.68 | 1.21x | 7.62, 8.77, 11.68 | 1.15x | 1.154 (1.088 to 1.511) |
+| `full6_2` | 10.30, 12.06, 15.55 | 1.17x | 7.70, 8.74, 11.81 | 1.14x | 1.139 (1.106 to 1.377) |
+| `full6_3` | 10.24, 12.11, 15.63 | 1.18x | 7.65, 8.72, 11.70 | 1.14x | 1.164 (1.104 to 1.754) |
+
+Over the 108 sync measurements, 6 had a slow probe (more than 1.25x its median), and none of those 6 was more than
+1.1x its run's median. One measurement was more than 1.1x its run's median (`full6_1`, 1 token, 1.13x), with a
+probe that was not slow.
+
+So with the new method, a 2-token pass on Zwyrol costs 1.17x to 1.21x of a 1-token pass in sync, and 1.14x to 1.15x
+pipelined. The sync ratio did not come down from the old method's 1.17x to 1.19x. Issue #25 item 1 expected about
+1.16x to 1.18x for Zwyrol (the old `unchanged_1` to `_3`, with the mean of the two 1-token values).
+
+## What the scripts did in these runs (the old method)
 
 `step_timing.py` loads the model with `Runtime.load` (as `mtp_test.py` does), prints the kernel each 4-bit matmul shape
 gets at 1, 2 and 3 rows, fills a cache with the same prompt and greedy reply as `mtp_test.py`'s timing (167 tokens for
@@ -72,6 +156,8 @@ every forced run, the two are the same: Runtime printed `compute dtype float16` 
 `set_compute_dtype` casts every bf16 array to that dtype, the scales included.
 
 ## Results
+
+All the tables below come from the old method.
 
 ### The unchanged code: the noise floor
 

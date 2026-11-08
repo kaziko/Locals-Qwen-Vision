@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Warm-up keys a layer's kernel choice on the activations' dtype** (issue #25). Warm-up and tuning built their
+  inputs in a layer's scales' dtype, but decode looks a choice up under the dtype of its input. A model whose scales
+  and activations differ would have had its warm-up choices go unread. `Runtime.load` and `locals.lm.patch` now
+  record the compute dtype on each 4-bit layer (scales of float32 keep their own), and warm-up, tuning and the idle
+  tuner build their inputs in it. For a model whose compute dtype is its scales' dtype (Zwyrol, the one model
+  checked in #25), the keys are the same as before. One helper, `kernels._tune_key`, now builds every tuning key.
+- **The two-token-pass and MTP timing scripts** (`docs/measurements/`, issue #25) time every pass the same number of
+  times with the same statistic, rotate the order of the passes, probe right before and after the timed steps, and
+  pipeline every timed build. While they run they mark the GPU busy for other Locals processes, and each result
+  records the scripts' hashes and the Locals servers running at its start and end.
 - **One kernel-tuning file per MLX version** (issue #24). Two installs on one Mac with two MLX versions (a uv tool
   and a repo's venv) shared `~/.cache/locals/tune_v6_<arch>.json`, and each start under the other version rewrote it.
   The file is now `tune_v6_<arch>_mlx<version>.json`; a version's first start seeds it from the user file written last

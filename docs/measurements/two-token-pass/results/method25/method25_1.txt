@@ -1,0 +1,37 @@
+mac: Apple M2 Max (applegpu_g14s, 32 GB)
+macos: 27.0
+mlx: 0.32.3
+mlx_lm: 0.32.0
+commit: 936c6c0
+model: Kaziko/Qwen3.5-4B-Zwyrol
+tune_cache: <scratch>/tune/tune_v6_applegpu_g14s.json
+preset: <repo>/locals/presets/tune_v6_applegpu_g14s.json
+force: []
+method: issue-25
+scripts: {'step_timing.py': 'f35c3053b02c585f9fe343edb24afacbfc300153ab41673de76d8f0e084aea6c', 'summarize.py': 'be9381e7addb054af50b1b54bdfbd73fa1ff1920fc23247069c9f23dde107aae', 'timing_setup.py': '488d4541121a365d3e45a50802ede910a5b04b053559ecf7bb964fa6768a6bfd'}
+servers_at_start: []
+Fetching 11 files:   0%|          | 0/11 [00:00<?, ?it/s]Fetching 11 files: 100%|██████████| 11/11 [00:00<00:00, 5595.12it/s]
+tune cache says mlx 0.32.3, 235 stale shapes
+
+kernel per matmul shape (layers using it): 1 row | 2 rows | 3 rows
+  2560x4096 (32, e.g. layers.31.self_attn.o_proj): ('mlx',) | ('multi', 8, 4, 2) | ('v3', 8, 4, 2)
+  2560x9216 (32, e.g. layers.31.mlp.down_proj): ('mlx',) | ('multi', 8, 4, 2) | ('v3', 16, 4, 2)
+  10240x2560 (8, e.g. layers.31.self_attn.qkv_proj): ('mlx',) | ('multi', 8, 4, 2) | ('v3', 8, 4, 2)
+  12352x2560 (24, e.g. layers.30.linear_attn.in_proj_all): ('mlx',) | ('multi', 8, 4, 2) | ('v3', 8, 8, 2)
+  18432x2560 (32, e.g. layers.31.mlp.gate_up_proj): ('mlx',) | ('multi', 8, 4, 2) | ('v3', 8, 8, 2)
+  248320x2560 (2, e.g. language_model.lm_head): ('mlx',) | ('multi', 8, 4, 2) | ('v3', 8, 8, 2)
+
+cache: 167 tokens (prompt 27, reply 140)
+round 0 (t=0 s, order 1 2 3): sync S=1 10.80, S=2 13.26, S=3 16.59, S=3 16.69, S=2 13.36, S=1 11.57 ms | probe before, after each 1.421 2.883, 1.212 1.192, 1.163 1.216, 1.195 1.369, 1.178 1.205, 1.228 1.218 ms | split (build + encode + wait) S=1 1.23+1.29+7.66, S=2 2.21+1.70+8.96, S=3 1.53+1.55+12.55 | pipelined S=1 8.58, S=2 9.07, S=3 12.22
+round 1 (t=9 s, order 2 3 1): sync S=2 13.04, S=3 16.21, S=1 10.77, S=1 10.95, S=3 16.35, S=2 12.57 ms | probe before, after each 1.217 1.164, 1.163 1.173, 1.177 1.192, 1.169 1.212, 1.179 1.165, 1.153 1.597 ms | split (build + encode + wait) S=2 1.87+1.53+9.02, S=3 1.61+1.60+12.54, S=1 1.21+1.29+7.74 | pipelined S=2 9.53, S=3 12.24, S=1 7.93
+round 2 (t=17 s, order 3 1 2): sync S=3 16.16, S=1 10.60, S=2 12.48, S=2 12.91, S=1 10.64, S=3 16.25 ms | probe before, after each 1.159 1.210, 1.170 1.170, 1.195 1.175, 1.193 1.210, 1.167 1.188, 1.202 1.197 ms | split (build + encode + wait) S=3 1.63+1.60+12.60, S=1 1.26+1.34+7.87, S=2 1.69+1.47+9.13 | pipelined S=3 12.43, S=1 7.98, S=2 9.15
+Locals servers: at the start none, at the end none
+
+over 3 rounds: mean (min to max), ms; ratio = mean / mean of S=1; sync: per round, the mean of each pass's two measurements
+  sync      S=1: 10.89 (10.62 to 11.19), 1.00x
+  sync      S=2: 12.94 (12.70 to 13.31), 1.19x
+  sync      S=3: 16.37 (16.20 to 16.64), 1.50x
+  pipelined S=1: 8.16 (7.93 to 8.58), 1.00x
+  pipelined S=2: 9.25 (9.07 to 9.53), 1.13x
+  pipelined S=3: 12.30 (12.22 to 12.43), 1.51x
+  probe (before and after each sync measurement): 1.258 (1.153 to 2.883) ms

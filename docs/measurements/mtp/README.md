@@ -21,6 +21,19 @@ position i and the embedding of token i+1, it predicts token i+2. The 4-bit MLX 
   (the layer fed its own output again over the same sequence: an approximation of a chained draft).
 - Last, it times a main step of 1, 2 and 3 tokens and one guess (the layer, the output head, argmax), with one
   `mx.eval` per step and no pipelining. The 1-token step is timed first and last, as the noise floor.
+  The committed results come from that method, which took the lower of the two 1-token values. Since issue #25 each
+  main step is timed twice, forward and back (1 2 3 3 2 1), and the mean of the two counts. While the script runs,
+  other Locals processes see the GPU as busy. The result's `setup` holds the scripts' hashes and the Locals servers
+  found at the start and at the end (see `../two-token-pass/README.md`). A first run with the new method, on
+  Zwyrol at commit `936c6c0`, is in `results/method25/`: main steps 11.05, 12.80 and 16.35 ms for 1, 2 and 3 tokens
+  (the mean of each pass's two), and no Locals server at the start or at the end. The command was the Zwyrol line
+  below, with the output in `<scratch>/runs/mtp_method25_1.json` and `LOCALS_TUNE_CACHE` set to the copy that
+  `../two-token-pass/README.md` describes. A second run, at commit `d0cc5b9` on 2026-11-08, right after the three
+  full `step_timing.py` runs ("Three full runs of the new method" there, with the same setup), is
+  `results/method25/full_1`: main steps 10.10, 12.45 and 15.81 ms (2 / 1: 1.23x). Its two 2-token values were 11.91
+  and 13.00 ms, and this script has no probe, so its 2 / 1 is less sure than `step_timing.py`'s. The 4-bit MTP guess
+  took 1.58 ms, 0.16 of a main step: estimate 1.32x with 1 draft, 1.30x with 2 (with 4-bit acceptance, before the
+  pipelining loss).
 
 ## Commands
 

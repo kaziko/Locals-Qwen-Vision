@@ -1,5 +1,7 @@
 """The tables of README.md from the result files of step_timing.py: each run's means, and how the slow sync
-measurements line up with the probe (MLX's own matmul, timed just before each one).
+measurements line up with the probe (MLX's own matmul). It reads both methods' files: the old one (issue #22: the
+probe before each measurement's fresh cache, S = 1 timed twice a round) and the new one (issue #25: the probe right
+before and right after the timed steps, the slower of the two counting here, every pass timed twice a round).
 Usage: summarize.py results/*.json"""
 import json
 import os
@@ -23,7 +25,7 @@ for path in sys.argv[1:]:
     rounds = d.get("rounds")
     if rounds == []:
         print(f"(skipped {os.path.basename(path)}: no rounds)")
-    elif rounds and "probe_before_sync" in rounds[0]:
+    elif rounds and ("probe_before_sync" in rounds[0] or isinstance(rounds[0].get("sync"), list)):
         runs[os.path.basename(path)[:-5]] = d
     else:
         print(f"(skipped {os.path.basename(path)}: not a step_timing.py result with the probe)")
@@ -43,11 +45,20 @@ for name, d in runs.items():
     parts = {S: [stt.mean(r["split"][S][i] for r in d["rounds"]) for i in range(3)] for S in ("1", "2", "3")}
     print(f"{name} | " + ", ".join(f"S={S} {b:.2f} + {e:.2f} + {w:.2f}" for S, (b, e, w) in parts.items()))
 
+def measurements(d):
+    """[(step, ms, probe ms)] of a run's sync measurements, step by step"""
+    rounds = d["rounds"]
+    if "probe_before_sync" in rounds[0]:  # (the old method)
+        return [(k, r["sync"][k], r["probe_before_sync"][k]) for k in ("1_first", "2", "3", "1_last") for r in rounds]
+    return [(str(m["S"]), m["ms"], max(m["probe_before"], m["probe_after"])) for r in rounds for m in r["sync"]]
+
+
 rows = []
 for name, d in runs.items():
-    for k in ("1_first", "2", "3", "1_last"):
-        med = stt.median(r["sync"][k] for r in d["rounds"])
-        rows += [Row(name, k, r["probe_before_sync"][k], r["sync"][k] / med) for r in d["rounds"]]
+    ms = measurements(d)
+    for step in dict.fromkeys(k for k, _, _ in ms):
+        med = stt.median(v for k, v, _ in ms if k == step)
+        rows += [Row(name, step, p, v / med) for k, v, p in ms if k == step]
 pm = stt.median(x.probe for x in rows)
 
 
