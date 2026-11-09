@@ -8,7 +8,9 @@ the tower from the same files, lazily, and turns preprocessed pixels into the
 take.
 
 The arithmetic is transformers' ``Qwen3_5VisionModel``, step for step: 16x16
-patches over 2 frames through one convolution, a learned 36x36 position table
+patches through the patch embed (the reference's conv over 2 identical frames,
+here one matmul over one frame with the two frame weights summed at load:
+``PatchEmbed``, ``_patch_weight``), a learned 36x36 position table
 resampled bilinearly to the image's own grid, axial 2D rope over half the head
 dim, ``depth`` pre-norm blocks that attend within one image, then a 2x2 patch
 merger that narrows 1024 to the text model's 2560.
@@ -103,7 +105,7 @@ def vision_config(model_dir: Path) -> Optional[VisionConfig]:
         return None  # (a split that does not cover the rotated dims: vision.MRoPE would refuse it on the first image)
     out = VisionConfig.from_dict(v)
     if (out.patch_size, out.temporal_patch_size, out.spatial_merge_size) != (16, 2, 2):
-        return None  # (vision.preprocess cuts 16x16 patches, merged 2x2, PatchEmbed sums two frames: other values, other tokens)
+        return None  # (vision.preprocess cuts 16x16 patches, merged 2x2; the frame weights' sum was checked at 2 frames only)
     out.mrope_section = tuple(section)
     return out
 
@@ -283,13 +285,18 @@ def _weights(path: Path) -> List[Tuple[str, mx.array]]:
     return out
 
 
-def _patch_weight(v: mx.array, cfg: VisionConfig) -> mx.array:
-    """The checkpoint's 5-D patch-embed conv weight as PatchEmbed's matmul weight, (out, 16*16*3): transformers' layout
-    (out, channels, frames, h, w) is put in MLX's (out, frames, h, w, channels) first (an mlx-vlm conversion,
-    mlx-community's, is in MLX's already), then the two frames are summed, in float32 so the sum is rounded once, to
-    the model's dtype in load_tower."""
+def _conv_layout(v: mx.array, cfg: VisionConfig) -> mx.array:
+    """The checkpoint's 5-D patch-embed conv weight in MLX's layout (out, frames, h, w, channels): transformers' is
+    (out, channels, frames, h, w); an mlx-vlm conversion (mlx-community's) is in MLX's already."""
     if v.shape[1] == cfg.in_channels and v.shape[-1] != cfg.in_channels:
-        v = v.transpose(0, 2, 3, 4, 1)
+        return v.transpose(0, 2, 3, 4, 1)
+    return v
+
+
+def _patch_weight(v: mx.array, cfg: VisionConfig) -> mx.array:
+    """The checkpoint's 5-D patch-embed conv weight as PatchEmbed's matmul weight, (out, 16*16*3): the frames are
+    summed, in float32 so the sum is rounded once, to the model's dtype in load_tower."""
+    v = _conv_layout(v, cfg)
     return v.astype(mx.float32).sum(axis=1).reshape(v.shape[0], -1)
 
 

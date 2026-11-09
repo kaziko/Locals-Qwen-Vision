@@ -4,12 +4,11 @@ import json
 import sys
 
 a, b = (json.load(open(p)) for p in sys.argv[1:3])
+names = [n for n in a if not n.startswith("_")]
 same = 0
-for name in a:
-    if name.startswith("_"):
-        continue
+for name in names:
     x, y = a[name]["answers"], b[name]["answers"]
     ok = x == y
     same += ok
     print(f"{name}: {'same answers' if ok else 'DIFFER'}; before {x[0][:60]!r}; after {y[0][:60]!r}")
-print(f"{same} of {sum(1 for n in a if not n.startswith('_'))} pictures: the same answers before and after")
+print(f"{same} of {len(names)} pictures: the same answers before and after")

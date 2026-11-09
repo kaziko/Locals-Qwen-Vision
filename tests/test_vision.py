@@ -45,7 +45,7 @@ def test_mrope_takes_h_and_w_from_their_interleaved_frequencies():
 
 
 def test_expand_and_positions():
-    pic = vision.Picture(np.zeros((4 * 6, 1536), np.float32), (4, 6))  # 4x6 patches: a 2x3 grid of text tokens
+    pic = vision.Picture(np.zeros((4 * 6, 16 * 16 * 3), np.float32), (4, 6))  # 4x6 patches: a 2x3 grid of text tokens
     assert pic.tokens == 6
     ids, spans = vision.expand([1, 2, 99, 3, 4], 99, [pic])
     assert ids == [1, 2] + [99] * 6 + [3, 4] and spans == [(2, 8)]
@@ -58,7 +58,7 @@ def test_expand_and_positions():
 
 
 def test_expand_refuses_a_count_that_does_not_match():
-    pic = vision.Picture(np.zeros((4, 1536), np.float32), (2, 2))
+    pic = vision.Picture(np.zeros((4, 16 * 16 * 3), np.float32), (2, 2))
     with pytest.raises(ValueError, match="placeholder"):
         vision.expand([1, 2], 99, [pic])
     with pytest.raises(ValueError, match="more image placeholders"):
@@ -258,7 +258,7 @@ def test_anthropic_images_become_image_parts():
     ("qwen3_5", {"hidden_size": 1024}, {"head_dim": 256, "rope_parameters": {"mrope_section": [24, 20, 20], "partial_rotary_factor": 0.25}}, False),
     ("qwen3_vl", {"hidden_size": 1152}, {"head_dim": 128, "rope_scaling": {"rope_type": "default"}}, False),
     ("qwen3_vl", {"hidden_size": 1152}, {"head_dim": 128, "rope_scaling": {"mrope_interleaved": False, "mrope_section": [24, 20, 20]}}, False),
-    # other patch values: vision.preprocess cuts 16x16 patches, the patch embed sums two frames, the merger takes 2x2
+    # other patch values: vision.preprocess cuts 16x16 patches, the merger takes 2x2, the frame sum was checked at 2
     ("qwen3_vl", {"hidden_size": 1152, "patch_size": 14},
      {"head_dim": 128, "rope_scaling": {"mrope_interleaved": True, "mrope_section": [24, 20, 20]}}, False),
     ("qwen3_vl", {"hidden_size": 1152, "spatial_merge_size": 4},

@@ -21,10 +21,9 @@ enc = vision.Encoder(model_id, mx.bfloat16)
 tower = enc.tower()
 d = enc.directory()
 cfg = enc._config
-w5 = [v for k, v in q._weights(d) if k == "patch_embed.proj.weight"][0]
-if w5.shape[1] == cfg.in_channels and w5.shape[-1] != cfg.in_channels:
-    w5 = w5.transpose(0, 2, 3, 4, 1)  # transformers' layout -> MLX's (out, frames, h, w, channels)
-b = [v for k, v in q._weights(d) if k == "patch_embed.proj.bias"][0]
+ws = dict(q._weights(d))
+w5 = q._conv_layout(ws["patch_embed.proj.weight"], cfg)  # MLX's (out, frames, h, w, channels)
+b = ws["patch_embed.proj.bias"]
 print(f"conv weight {w5.shape} {w5.dtype}, bias {b.shape} {b.dtype}", flush=True)
 
 rng = np.random.default_rng(0)

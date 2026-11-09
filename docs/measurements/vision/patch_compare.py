@@ -7,8 +7,9 @@ import numpy as np
 
 a, b = np.load(sys.argv[1]), np.load(sys.argv[2])
 for k in sorted(k for k in a.files if k.startswith("features")):
-    d = np.abs(a[k].astype(np.float64) - b[k].astype(np.float64))
-    print(f"{k} {a[k].shape}: max abs diff {d.max():.4g}, mean abs diff {d.mean():.4g}, "
-          f"max abs value {np.abs(a[k]).max():.4g}, {int((d > 0).sum())} of {d.size} values differ")
-same = a["positions"].shape == b["positions"].shape and bool(np.array_equal(a["positions"], b["positions"]))
-print(f"positions {a['positions'].shape}: {'the same array' if same else 'DIFFER'}")
+    x, y = a[k], b[k]  # each [k] reads the member from the zip again
+    d = np.abs(x.astype(np.float64) - y.astype(np.float64))
+    print(f"{k} {x.shape}: max abs diff {d.max():.4g}, mean abs diff {d.mean():.4g}, "
+          f"max abs value {np.abs(x).max():.4g}, {int((d > 0).sum())} of {d.size} values differ")
+pa, pb = a["positions"], b["positions"]
+print(f"positions {pa.shape}: {'the same array' if np.array_equal(pa, pb) else 'DIFFER'}")

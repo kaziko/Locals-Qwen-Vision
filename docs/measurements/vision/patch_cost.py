@@ -43,15 +43,11 @@ def timer(key, f, sync):
 vision.preprocess = timer("preprocess", vision.preprocess, False)
 q.PatchEmbed.__call__ = timer("patch_embed", q.PatchEmbed.__call__, True)
 timed_positions = timer("positions", vision.positions, True)
-real_encode = vision.Encoder.encode
+timed_encode = timer("tower", vision.Encoder.encode, True)  # encode evals its outputs itself: the eval here is a no-op
 
 
 def encode(self, pictures):
-    mx.synchronize()
-    t = time.perf_counter()
-    feats, deep = real_encode(self, pictures)
-    mx.synchronize()
-    stages["tower"].append(time.perf_counter() - t)
+    feats, deep = timed_encode(self, pictures)
     saved["features"] = [np.array(f.astype(mx.float32)) for f in feats]
     return feats, deep
 
@@ -91,17 +87,15 @@ for _ in range(4):
     srv.complete(req)
     whole.append(time.perf_counter() - t)
 
-n_pics = len(stages["preprocess"]) // 4
-
-
-def med(v, per):  # per: calls per request; the sum over a request, median of runs 2-4
+def med(v):  # the sum over a request (the calls split evenly over the 4 requests), median of runs 2-4
+    per = len(v) // 4
     sums = [sum(v[i * per:(i + 1) * per]) for i in range(4)]
-    return statistics.median(sums[1:]) * 1000, [s * 1000 for s in sums]
+    return statistics.median(sums[1:]) * 1000, [s * 1000 for s in sums], per
 
 
 lines = []
-for key, per in (("preprocess", n_pics), ("patch_embed", len(stages["patch_embed"]) // 4), ("positions", len(stages["positions"]) // 4), ("tower", len(stages["tower"]) // 4)):
-    m, runs = med(stages[key], per)
+for key, v in stages.items():
+    m, runs, per = med(v)
     lines.append(f"{key} {m:.2f} ms (runs: {', '.join(f'{r:.2f}' for r in runs)}; {per} call(s) a request)")
 m_whole = statistics.median(whole[1:]) * 1000
 print(f"{model_id}: " + ", ".join(lines) + f", whole request {m_whole:.0f} ms (runs: {', '.join(f'{r * 1000:.0f}' for r in whole)})", flush=True)

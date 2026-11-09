@@ -176,10 +176,9 @@ def measure(raw: bytes, family: str = QWEN) -> Picture:
 
 
 def preprocess(raw: bytes, family: str = QWEN) -> Picture:
-    """Image bytes -> the model's patch vectors. Qwen: 16x16 patches in spatial-merge order, one frame a patch (the
-    tower reads an image as two identical frames; its patch embed sums the frames' weights instead, load_tower).
-    Gemma: 16x16 patches in raster order, channels last inside a patch, rescaled to [0, 1] (its patch embedder
-    applies ``2 * (pixel - 0.5)`` itself)."""
+    """Image bytes -> the model's patch vectors. Qwen: 16x16 patches in spatial-merge order, one row of pixels a
+    patch (what its ``PatchEmbed`` reads). Gemma: 16x16 patches in raster order, channels last inside a patch,
+    rescaled to [0, 1] (its patch embedder applies ``2 * (pixel - 0.5)`` itself)."""
     import numpy as np
     from PIL import Image
 
