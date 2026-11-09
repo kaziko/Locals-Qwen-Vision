@@ -107,7 +107,8 @@ def test_a_qwen_tower_reads_one_frame_as_the_checkpoints_conv_read_two(tmp_path,
     one = mx.array(rng.standard_normal((24, 16 * 16 * 3)).astype(np.float32))  # a 4x6 grid, one frame a patch
     two = mx.broadcast_to(one.reshape(24, 1, 16, 16, 3), (24, 2, 16, 16, 3))
     want = mx.conv3d(two, w, stride=(2, 16, 16)).reshape(24, -1) + b
-    assert np.allclose(np.array(tower.patch_embed(one)), np.array(want), atol=1e-4)
+    # float32 rounding of two summed products against one: 2e-4 measured here, on values up to about 130
+    assert np.allclose(np.array(tower.patch_embed(one)), np.array(want), rtol=0, atol=1e-3)
     assert tower.image(one, (4, 6))[0].shape == (6, 24)
 
 

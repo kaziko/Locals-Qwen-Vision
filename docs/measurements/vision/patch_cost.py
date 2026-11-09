@@ -87,6 +87,11 @@ for _ in range(4):
     srv.complete(req)
     whole.append(time.perf_counter() - t)
 
+for key, v in stages.items():  # a hook that never fired, or fired unevenly, is an error, not a 0.00 ms stage
+    assert v and len(v) % 4 == 0, f"{key}: {len(v)} call(s) over 4 requests"
+assert saved["positions"] is not None and saved["features"], "no positions or features captured"
+
+
 def med(v):  # the sum over a request (the calls split evenly over the 4 requests), median of runs 2-4
     per = len(v) // 4
     sums = [sum(v[i * per:(i + 1) * per]) for i in range(4)]
@@ -99,8 +104,7 @@ for key, v in stages.items():
     lines.append(f"{key} {m:.2f} ms (runs: {', '.join(f'{r:.2f}' for r in runs)}; {per} call(s) a request)")
 m_whole = statistics.median(whole[1:]) * 1000
 print(f"{model_id}: " + ", ".join(lines) + f", whole request {m_whole:.0f} ms (runs: {', '.join(f'{r * 1000:.0f}' for r in whole)})", flush=True)
-if saved["positions"] is not None:
-    print(f"positions shape {saved['positions'].shape}, features " + ", ".join(str(f.shape) for f in saved["features"]), flush=True)
+print(f"positions shape {saved['positions'].shape}, features " + ", ".join(str(f.shape) for f in saved["features"]), flush=True)
 if out:
     np.savez(out, positions=saved["positions"], **{f"features{i}": f for i, f in enumerate(saved["features"])})
     print("saved", out, flush=True)

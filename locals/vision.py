@@ -200,7 +200,7 @@ def preprocess(raw: bytes, family: str = QWEN) -> Picture:
     pixels = np.asarray(im, dtype=np.float32) / 127.5 - 1.0  # (h, w, 3), mean/std 0.5
     hp, wp = hb // 16, wb // 16
     x = pixels.reshape(hp // 2, 2, 16, wp // 2, 2, 16, 3).transpose(0, 3, 1, 4, 2, 5, 6).reshape(-1, 16 * 16 * 3)
-    return Picture(np.ascontiguousarray(x), (hp, wp), _key(raw, (hp, wp)))
+    return Picture(x, (hp, wp), _key(raw, (hp, wp)))
 
 
 NO_FILES = "this server reads no files of its own for an image: send the image's bytes (a data URL)"
