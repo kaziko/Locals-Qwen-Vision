@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # A draft pass is launched before the last one is read; a rejected draft slot stays as a hole
@@ -97,7 +97,7 @@ for one seed today as well, with the same distribution.
 - **Keep the CPU in the loop, read less** (one flag instead of the picks). Still one sync per pass, so the
   pipelining of the stream is still lost; #18 puts that at 16% with one request. The 0.98x is mostly that.
 
-## Decisions on the open points (PR #36)
+## Decisions on the open points (PR #36, 2026-11-10)
 
 1. **Holes in the main KV; `cache.offset` stays a Python int.** The physical offset counts stored slots; a
    device-side logical position counter, used only in the rope path of a one-row cache during a solo stretch,
@@ -105,4 +105,5 @@ for one seed today as well, with the same distribution.
 2. **Compact at the stretch end only.** The CPU catching up is not a boundary: the same stretch goes on. One
    gather at the boundary that needs a dense cache anyway; an adaptive threshold, if long stretches ever make the
    masked length costly, is a separate optimization.
-3. **The random stream**, as the section above: open until the maintainer accepts that wording.
+3. **The random stream**, as the section above: the same variates from the same key indices, in the same
+   order as today's solo loop; the reference for the seeded test is that loop, not MTP off.
