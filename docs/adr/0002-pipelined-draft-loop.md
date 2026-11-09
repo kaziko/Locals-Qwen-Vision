@@ -36,7 +36,41 @@ When it finds one of these, pass p+1 was launched on a token that should not hav
 - **A forced span** (`controller.forced(y)`): the span follows the committed token `y`, which pass p+1 did feed;
   its draft slot is marked as a hole, and the span is fed in the next pass as today.
 
+A pass launched on a token that should not have been fed is a **discarded pass**: nothing of it is committed, and
+it consumes no index of the random stream (below).
+
+The draft checks `_draft_checked` makes before a pass today (an end-of-sequence draft, a draft the grammar does
+not allow, the `max_tokens` budget) and the back-off after rejections (`solo_miss`, `solo_resume`) cannot run on
+the CPU before the launch: the draft is a device value. They become one device flag, `valid`: the draft is not
+an end-of-sequence token, the grammar allows it (`allowed[g][d']` from the grammar table), it is inside the
+budget (a device count of committed tokens), and the back-off is over (device `miss` and `resume` counters). With `valid` false the pass still feeds
+`[x', d']`, but position 0 is sampled by the draft-less rule and the slot `d'` is a hole: the same tokens and the
+same draws as today's draft-less pass, at the cost of a 2-token pass where today runs a 1-token step.
+
 The reply is the same token for token: only the main model's own picks are committed, as now.
+
+## The random stream of a seeded request
+
+A seeded request draws from keys `row_key(seed, n)`; `r.draws` is the index `n` of the next key. Today's
+schedule, which the new loop keeps variate for variate:
+
+| Pass | Key `n` is used for | `n` |
+|---|---|---|
+| a plain step, or a solo pass with no draft (`_specs`) | the Gumbel noise of the one sampled token | +1 |
+| a solo pass with k draft tokens (`_solo_verify`) | split in two: one uniform per draft position (all k drawn at once), and exactly one categorical draw: the residual at the first rejected position, else the bonus token after the k kept | +1, whatever the outcome |
+| greedy (temperature 0), a forced-span token, a pass not run (a draft cut to nothing, the back-off) | nothing | +0 |
+
+In the pipelined loop the index is assigned at launch, before pass p's outcome is known; the key depends only
+on the index, so that is safe. The pass computes both rules from that key, the draft rule (split key, uniform,
+categorical) and the draft-less rule (Gumbel), and `valid` selects one with `where`; `kept` selects between the
+residual and the bonus draw, both from the second half, as today's code draws exactly one of them. A discarded
+pass gives its index back: the pass that replaces it (a forced span) uses the same `n`. A greedy request assigns
+no index.
+
+The proof is a seeded regression test: the same request through today's solo loop and the new one, token for
+token, over replies with kept drafts, rejected drafts, a cut draft and a back-off. MTP off is not the
+reference: the two rules draw different variates from the same key, so MTP on and off give different replies
+for one seed today as well, with the same distribution.
 
 ## Consequences
 
@@ -63,10 +97,12 @@ The reply is the same token for token: only the main model's own picks are commi
 - **Keep the CPU in the loop, read less** (one flag instead of the picks). Still one sync per pass, so the
   pipelining of the stream is still lost; #18 puts that at 16% with one request. The 0.98x is mostly that.
 
-## Open points for the maintainer
+## Decisions on the open points (PR #36)
 
-1. Holes in the main KV, or a rewrite of the cache offset? This record proposes holes because the MTP entry
-   already lives that way and the attention mask is one flag column.
-2. Where to compact: only at the stretch's end (cheapest), or also whenever the CPU catches up with no backlog.
-3. Sampled replies with a seed: the draws stay on the device, but `r.draws` counts per pass on the CPU; the
-   count must advance in the same order as today for the same seed to give the same reply.
+1. **Holes in the main KV; `cache.offset` stays a Python int.** The physical offset counts stored slots; a
+   device-side logical position counter, used only in the rope path of a one-row cache during a solo stretch,
+   counts real positions. Compact before anything that expects a dense cache.
+2. **Compact at the stretch end only.** The CPU catching up is not a boundary: the same stretch goes on. One
+   gather at the boundary that needs a dense cache anyway; an adaptive threshold, if long stretches ever make the
+   masked length costly, is a separate optimization.
+3. **The random stream**, as the section above: open until the maintainer accepts that wording.
