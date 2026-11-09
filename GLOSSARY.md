@@ -23,3 +23,7 @@ _Avoid_: drafter, draft model
 **MTP layer**:
 The model's own extra layer that predicts the token after next from the main model's state at the current token. Qwen3.5 checkpoints have one; their 4-bit MLX conversions drop it.
 _Avoid_: MTP head, draft head, guess layer
+
+**Hole**:
+A position in a request's cache whose content later positions must not see: it is masked out of attention. The MTP layer's entry has one at each position the layer did not see.
+_Avoid_: gap, masked slot, padding
