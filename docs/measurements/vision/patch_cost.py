@@ -42,7 +42,7 @@ def timer(key, f, sync):
 
 vision.preprocess = timer("preprocess", vision.preprocess, False)
 q.PatchEmbed.__call__ = timer("patch_embed", q.PatchEmbed.__call__, True)
-vision.positions = timer("positions", vision.positions, True)
+timed_positions = timer("positions", vision.positions, True)
 real_encode = vision.Encoder.encode
 
 
@@ -57,11 +57,10 @@ def encode(self, pictures):
 
 
 vision.Encoder.encode = encode
-real_positions = vision.positions
 
 
 def positions(*a, **k):
-    r = real_positions(*a, **k)
+    r = timed_positions(*a, **k)
     saved["positions"] = np.array(r)
     return r
 

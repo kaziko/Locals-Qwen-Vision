@@ -85,14 +85,17 @@ PYTHONPATH=before <repo>/.venv/bin/python patch_cost.py <model> before_<m>_<n>.n
 <repo>/.venv/bin/python patch_form.py                           # the conv and the matmul alone, random weights
 PYTHONPATH=before <repo>/.venv/bin/python run_locals.py <model> pics tok_before_<m>.json   # the six questions, before
 <repo>/.venv/bin/python run_locals.py <model> pics tok_after_<m>.json                      # and after
+<repo>/.venv/bin/python answers_compare.py tok_before_<m>.json tok_after_<m>.json
 ```
 
 `patch_cost.py` sends `stage_cost.py`'s request and times, inside it, `vision.preprocess` (the HTTP thread), the tower's
 patch embed alone (evaluated on its own, so its time is its own plus the pixels' copy to the GPU), `vision.positions`
 (evaluated), the whole tower and the whole request; the prompt cache is emptied before each request, so every run runs
 the tower. With a file name it saves the last run's tower features and positions, which `patch_compare.py` compares
-between two builds. Each build was run twice per model, one model at a time, nothing else on the GPU. Both scripts
-print which `locals` they imported. The 8B model's files are in a cache on another drive (`HF_HUB_CACHE`).
+between two builds; `answers_compare.py` compares two `run_locals.py` outputs answer for answer. Each build was run
+twice per model, one model at a time, no other locals process running. `patch_cost.py`, `patch_round.py` and
+`run_locals.py` print which `locals` they imported. The 8B model's files are in a cache on another drive
+(`HF_HUB_CACHE`).
 
 ## A follow-up turn about the same images (`results/turn2_cost.txt`)
 

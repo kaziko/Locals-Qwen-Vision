@@ -3,53 +3,41 @@
 # before: main at fb669f8 (a two-frame Conv3d over two copies of each patch); after: the frame weights summed at load, one matmul over one frame.
 # one model at a time; no other locals process was running (pgrep before the first run); other GPU use was not checked.
 
-## patch_cost.py, before (locals from the frozen copy of fb669f8)
+## patch_cost.py, before (locals from the frozen copy of fb669f8: <scratch>/before)
 locals from <scratch>/before/locals/__init__.py
-loading mlx-community/Qwen3.5-4B-MLX-4bit on engine locals ...
-engine locals ready in 4.7s
-[locals] tool calls: qwen_xml; thinking: open
-requests up to 262144 tokens (what fits in GPU memory next to the model, up to its own context; --max-context sets it)
-locals: loading mlx-community/Qwen3.5-4B-MLX-4bit's vision tower ...
-[locals] prompt 5666 (0 cached)  out 1 tok  0 tok/s  0 call(s)  finish=length
-[locals] prompt 5666 (0 cached)  out 1 tok  0 tok/s  0 call(s)  finish=length
-[locals] prompt 5666 (0 cached)  out 1 tok  0 tok/s  0 call(s)  finish=length
-[locals] prompt 5666 (0 cached)  out 1 tok  0 tok/s  0 call(s)  finish=length
 mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 42.66 ms (runs: 41.22, 46.66, 42.66, 42.41; 2 call(s) a request), patch_embed 28.71 ms (runs: 38.31, 32.00, 28.71, 27.06; 2 call(s) a request), positions 0.97 ms (runs: 0.72, 5.88, 0.97, 0.70; 1 call(s) a request), tower 1115.37 ms (runs: 1362.05, 1131.07, 1114.48, 1115.37; 1 call(s) a request), whole request 6546 ms (runs: 6904, 6576, 6546, 6546)
 positions shape (3, 5666), features (1000, 2560), (1024, 2560)
 saved <scratch>/before_q35_rerun_1.npz
 locals from <scratch>/before/locals/__init__.py
-loading mlx-community/Qwen3.5-4B-MLX-4bit on engine locals ...
-engine locals ready in 3.9s
-[locals] tool calls: qwen_xml; thinking: open
-requests up to 262144 tokens (what fits in GPU memory next to the model, up to its own context; --max-context sets it)
-locals: loading mlx-community/Qwen3.5-4B-MLX-4bit's vision tower ...
-[locals] prompt 5666 (0 cached)  out 1 tok  0 tok/s  0 call(s)  finish=length
-[locals] prompt 5666 (0 cached)  out 1 tok  0 tok/s  0 call(s)  finish=length
-[locals] prompt 5666 (0 cached)  out 1 tok  0 tok/s  0 call(s)  finish=length
-[locals] prompt 5666 (0 cached)  out 1 tok  0 tok/s  0 call(s)  finish=length
 mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 47.60 ms (runs: 39.07, 48.16, 43.23, 47.60; 2 call(s) a request), patch_embed 27.20 ms (runs: 40.69, 27.20, 27.69, 26.79; 2 call(s) a request), positions 0.90 ms (runs: 0.89, 1.39, 0.75, 0.90; 1 call(s) a request), tower 1119.75 ms (runs: 1399.05, 1120.82, 1119.75, 1116.23; 1 call(s) a request), whole request 6577 ms (runs: 6867, 6566, 6607, 6577)
 positions shape (3, 5666), features (1000, 2560), (1024, 2560)
 saved <scratch>/before_q35_rerun_2.npz
-mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 51.19 ms (runs: 39.77, 51.19, 56.70, 39.44; 2 call(s) a request), patch_embed 30.11 ms (runs: 36.99, 30.11, 31.29, 29.33; 2 call(s) a request), positions 1.00 ms (runs: 4.84, 0.64, 1.00, 1.28; 1 call(s) a request), tower 1525.80 ms (runs: 4421.32, 1511.78, 1525.80, 1528.48; 1 call(s) a request), whole request 12625 ms (runs: 16922, 12834, 12625, 11918)
+locals from <scratch>/before/locals/__init__.py
+mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 50.63 ms (runs: 48.63, 50.63, 52.88, 47.45; 2 call(s) a request), patch_embed 30.83 ms (runs: 48.11, 30.83, 31.26, 29.95; 2 call(s) a request), positions 0.75 ms (runs: 0.66, 0.75, 0.98, 0.62; 1 call(s) a request), tower 1496.59 ms (runs: 4483.96, 1496.59, 1497.45, 1492.56; 1 call(s) a request), whole request 13222 ms (runs: 17997, 13693, 13222, 12842)
 positions shape (3, 5512), features (1000, 4096), (1024, 4096)
-saved <scratch>/before_vl8_1.npz
-mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 45.85 ms (runs: 43.21, 43.89, 45.85, 46.80; 2 call(s) a request), patch_embed 30.15 ms (runs: 34.21, 29.79, 30.15, 30.38; 2 call(s) a request), positions 0.68 ms (runs: 0.72, 0.68, 2.67, 0.66; 1 call(s) a request), tower 1522.81 ms (runs: 4397.90, 1512.67, 1522.81, 1526.61; 1 call(s) a request), whole request 12863 ms (runs: 15496, 12683, 14354, 12863)
+saved <scratch>/before_vl8_rerun_1.npz
+locals from <scratch>/before/locals/__init__.py
+mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 40.95 ms (runs: 45.28, 45.12, 38.37, 40.95; 2 call(s) a request), patch_embed 29.79 ms (runs: 38.73, 29.36, 29.80, 29.79; 2 call(s) a request), positions 0.77 ms (runs: 0.67, 0.58, 1.25, 0.77; 1 call(s) a request), tower 1488.91 ms (runs: 4406.24, 1488.91, 1490.98, 1488.29; 1 call(s) a request), whole request 11732 ms (runs: 16027, 15650, 11732, 11722)
 positions shape (3, 5512), features (1000, 4096), (1024, 4096)
-saved <scratch>/before_vl8_2.npz
+saved <scratch>/before_vl8_rerun_2.npz
 
-## patch_cost.py, after (the working tree)
-mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 37.06 ms (runs: 39.10, 45.44, 36.36, 37.06; 2 call(s) a request), patch_embed 2.78 ms (runs: 5.63, 7.30, 2.64, 2.78; 2 call(s) a request), positions 1.22 ms (runs: 2.00, 2.83, 0.92, 1.22; 1 call(s) a request), tower 1092.57 ms (runs: 1383.43, 1138.97, 1092.57, 1090.32; 1 call(s) a request), whole request 6565 ms (runs: 7115, 6633, 6565, 6560)
+## patch_cost.py, after (the working tree, this commit)
+locals from <repo>/locals/__init__.py
+mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 38.23 ms (runs: 35.10, 38.44, 37.33, 38.23; 2 call(s) a request), patch_embed 2.81 ms (runs: 3.22, 3.02, 2.81, 2.56; 2 call(s) a request), positions 1.22 ms (runs: 0.70, 1.22, 1.06, 1.26; 1 call(s) a request), tower 1059.57 ms (runs: 1173.36, 1058.53, 1059.57, 1063.03; 1 call(s) a request), whole request 6338 ms (runs: 6486, 6337, 6338, 6350)
 positions shape (3, 5666), features (1000, 2560), (1024, 2560)
-saved <scratch>/after_q35_1.npz
-mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 39.42 ms (runs: 37.24, 41.85, 39.42, 38.47; 2 call(s) a request), patch_embed 3.11 ms (runs: 3.02, 3.17, 2.77, 3.11; 2 call(s) a request), positions 1.26 ms (runs: 0.77, 1.30, 1.26, 0.94; 1 call(s) a request), tower 1083.93 ms (runs: 1137.52, 1083.93, 1086.28, 1083.06; 1 call(s) a request), whole request 6536 ms (runs: 6656, 6507, 6536, 6582)
+saved <scratch>/after2_q35_1.npz
+locals from <repo>/locals/__init__.py
+mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 37.01 ms (runs: 35.74, 40.29, 36.16, 37.01; 2 call(s) a request), patch_embed 2.86 ms (runs: 3.12, 2.93, 2.86, 2.74; 2 call(s) a request), positions 0.86 ms (runs: 0.75, 1.01, 0.73, 0.86; 1 call(s) a request), tower 1079.98 ms (runs: 1098.67, 1078.05, 1083.85, 1079.98; 1 call(s) a request), whole request 6484 ms (runs: 6552, 6492, 6484, 6481)
 positions shape (3, 5666), features (1000, 2560), (1024, 2560)
-saved <scratch>/after_q35_2.npz
-mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 40.50 ms (runs: 35.91, 46.83, 40.50, 38.58; 2 call(s) a request), patch_embed 3.55 ms (runs: 4.94, 3.55, 3.41, 3.81; 2 call(s) a request), positions 0.68 ms (runs: 0.64, 0.68, 0.70, 0.67; 1 call(s) a request), tower 1503.71 ms (runs: 4401.21, 1503.71, 1491.75, 1521.40; 1 call(s) a request), whole request 12814 ms (runs: 16080, 12763, 12814, 15748)
+saved <scratch>/after2_q35_2.npz
+locals from <repo>/locals/__init__.py
+mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 40.01 ms (runs: 37.48, 42.09, 37.07, 40.01; 2 call(s) a request), patch_embed 3.15 ms (runs: 7.01, 3.79, 3.06, 3.15; 2 call(s) a request), positions 1.42 ms (runs: 0.59, 0.87, 1.55, 1.42; 1 call(s) a request), tower 1482.60 ms (runs: 4400.47, 1500.41, 1482.60, 1458.46; 1 call(s) a request), whole request 11713 ms (runs: 16462, 11930, 11713, 11692)
 positions shape (3, 5512), features (1000, 4096), (1024, 4096)
-saved <scratch>/after_vl8_1.npz
-mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 40.93 ms (runs: 37.62, 40.14, 40.93, 75.10; 2 call(s) a request), patch_embed 3.23 ms (runs: 5.54, 3.23, 3.17, 3.85; 2 call(s) a request), positions 0.68 ms (runs: 0.56, 0.68, 0.65, 0.84; 1 call(s) a request), tower 1500.95 ms (runs: 4393.52, 1518.58, 1498.59, 1500.95; 1 call(s) a request), whole request 13384 ms (runs: 16397, 13384, 13176, 13441)
+saved <scratch>/after2_vl8_1.npz
+locals from <repo>/locals/__init__.py
+mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 36.96 ms (runs: 44.35, 40.03, 36.45, 36.96; 2 call(s) a request), patch_embed 2.96 ms (runs: 5.13, 3.38, 2.94, 2.96; 2 call(s) a request), positions 0.56 ms (runs: 0.57, 0.56, 0.56, 1.17; 1 call(s) a request), tower 1458.35 ms (runs: 4386.32, 1458.35, 1456.77, 1458.43; 1 call(s) a request), whole request 12635 ms (runs: 16029, 12635, 12793, 11703)
 positions shape (3, 5512), features (1000, 4096), (1024, 4096)
-saved <scratch>/after_vl8_2.npz
+saved <scratch>/after2_vl8_2.npz
 
 ## patch_compare.py: the unchanged code twice (the noise floor of the features), then before against after
 # Qwen3.5-4B: before run 1 against before run 2
@@ -94,8 +82,12 @@ linear 768 (resident input): median 0.67 ms (min 0.65)
 transfer + conv3d 2 frames: median 6.46 ms (min 6.40)
 transfer + linear 768: median 0.81 ms (min 0.78)
 
-## run_locals.py: the six pictures' questions (make_pictures.py), max_tokens 60, temperature 0, each asked twice; before against after
+## run_locals.py: the six pictures' questions (make_pictures.py), max_tokens 60, temperature 0, each asked twice; before (the frozen copy) against after, answers_compare.py
 # Qwen3.5-4B
+locals from <scratch>/before/locals/__init__.py
+locals from <repo>/locals/__init__.py
+encode calls 12, deepstack levels from the tower 0, used
+encode calls 12, deepstack levels from the tower 0, used
 cat42_640x400.png: same answers; before 'cat 2'; after 'cat 2'
 cat42_1280x800.png: same answers; before 'cat 42'; after 'cat 42'
 shapes_640x480.png: same answers; before 'From left to right, the shapes and their colors are:\n\n1. **R'; after 'From left to right, the shapes and their colors are:\n\n1. **R'
@@ -104,6 +96,10 @@ smallfont_512x256.png: same answers; before 'HELLO WORLD from a small font'; aft
 bars_768x512.png: same answers; before 'Looking at the bar chart:\n\n- **Bar A** is the shortest.\n- **'; after 'Looking at the bar chart:\n\n- **Bar A** is the shortest.\n- **'
 6 of 6 pictures: the same answers before and after
 # Qwen3-VL-8B
+locals from <scratch>/before/locals/__init__.py
+locals from <repo>/locals/__init__.py
+encode calls 6, deepstack levels from the tower 3, used
+encode calls 6, deepstack levels from the tower 3, used
 cat42_640x400.png: same answers; before 'c at a'; after 'c at a'
 cat42_1280x800.png: same answers; before 'catar'; after 'catar'
 shapes_640x480.png: same answers; before 'Based on the image provided, here are the shapes listed from'; after 'Based on the image provided, here are the shapes listed from'

@@ -84,9 +84,11 @@ def test_patches_are_in_spatial_merge_order():
     assert [tuple(c) for c in coords] == want
 
 
-def test_a_qwen_tower_reads_one_frame_as_the_checkpoints_conv_read_two(tmp_path):
-    """The checkpoint's patch embed is a conv over two identical frames of an image (transformers' layout). The tower
-    loads it summed over the frames and reads one frame of pixels: the conv's own output, up to rounding."""
+@pytest.mark.parametrize("layout", ["transformers", "mlx"])
+def test_a_qwen_tower_reads_one_frame_as_the_checkpoints_conv_read_two(tmp_path, layout):
+    """The checkpoint's patch embed is a conv over two identical frames of an image, in transformers' layout (out,
+    channels, frames, h, w) or MLX's (out, frames, h, w, channels; mlx-community's files). The tower loads it summed
+    over the frames and reads one frame of pixels: the conv's own output, up to rounding."""
     from mlx.utils import tree_flatten
 
     from locals.models.qwen3_5_vl import VisionConfig, VisionTower, load_tower
@@ -94,16 +96,17 @@ def test_a_qwen_tower_reads_one_frame_as_the_checkpoints_conv_read_two(tmp_path)
     cfg = VisionConfig(depth=1, hidden_size=32, intermediate_size=64, num_heads=4, num_position_embeddings=16,
                        out_hidden_size=24)
     rng = np.random.default_rng(3)
-    w = mx.array(rng.standard_normal((32, 3, 2, 16, 16)).astype(np.float32))  # (out, channels, frames, h, w)
+    w = mx.array(rng.standard_normal((32, 2, 16, 16, 3)).astype(np.float32))  # MLX's layout
     b = mx.array(rng.standard_normal((32,)).astype(np.float32))
     weights = {"model.visual." + k: v for k, v in tree_flatten(VisionTower(cfg).parameters())}
-    weights["model.visual.patch_embed.proj.weight"], weights["model.visual.patch_embed.proj.bias"] = w, b
+    weights["model.visual.patch_embed.proj.weight"] = w.transpose(0, 4, 1, 2, 3) if layout == "transformers" else w
+    weights["model.visual.patch_embed.proj.bias"] = b
     mx.save_safetensors(str(tmp_path / "model.safetensors"), weights)
 
     tower = load_tower(tmp_path, mx.float32, cfg)
     one = mx.array(rng.standard_normal((24, 16 * 16 * 3)).astype(np.float32))  # a 4x6 grid, one frame a patch
     two = mx.broadcast_to(one.reshape(24, 1, 16, 16, 3), (24, 2, 16, 16, 3))
-    want = mx.conv3d(two, w.transpose(0, 2, 3, 4, 1), stride=(2, 16, 16)).reshape(24, -1) + b
+    want = mx.conv3d(two, w, stride=(2, 16, 16)).reshape(24, -1) + b
     assert np.allclose(np.array(tower.patch_embed(one)), np.array(want), atol=1e-4)
     assert tower.image(one, (4, 6))[0].shape == (6, 24)
 
