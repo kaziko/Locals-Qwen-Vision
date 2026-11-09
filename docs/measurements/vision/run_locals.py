@@ -2,8 +2,11 @@
 Usage: run_locals.py MODEL PICDIR OUT.json [nodeepstack]"""
 import base64, json, sys
 from pathlib import Path
+import locals as L
 from locals import vision
 from locals.server import Server
+
+print("locals from", L.__file__, flush=True)
 
 model_id, pics, out = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
 nodeep = len(sys.argv) > 4 and sys.argv[4] == "nodeepstack"

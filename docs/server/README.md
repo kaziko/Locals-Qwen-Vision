@@ -433,8 +433,9 @@ In a stream, tool calls are collected and sent in the final `done` line. Errors 
 Qwen3.5, Qwen3-VL and Gemma 4 read images on our engine. `vision.family` reads the checkpoint's `config.json`:
 `model_type` `gemma4` is Gemma's tower (`vision_config` in `locals/models/gemma4_vl.py`), anything else Qwen's
 (`locals/models/qwen3_5_vl.py`, which also decides from the config: a vision tower with Qwen's patch values, 16x16
-patches over two frames merged 2x2: the only ones `vision.preprocess` cuts for it, and an interleaved M-RoPE split
-that covers the rotated dims). For either, `has_tower` reads the checkpoint's safetensors headers: the tower's
+patches merged 2x2 and a temporal patch of two frames, the only ones `vision.preprocess` cuts, and an interleaved
+M-RoPE split that covers the rotated dims; `preprocess` cuts one frame a patch, and the checkpoint's two frame weights
+are summed at load). For either, `has_tower` reads the checkpoint's safetensors headers: the tower's
 weights are in them. mlx-lm keeps only the text half of such a checkpoint (its `sanitize` drops the tower), so the
 tower is rebuilt from the same files and loaded with the first image, not at start. Any other model, and the stock
 engine, gets `IMAGE_NOTE` in each image's place, as before. So does a Gemma 4 checkpoint whose text config asks for

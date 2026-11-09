@@ -1,0 +1,109 @@
+# M2 Max (32 GB), 2026-11-09, issue #26. Each line one process; each model and build run twice; medians of runs 2-4 of 4 requests.
+# the request: ~150 lines of text, a 1280x800 and a 1024x1024 PNG, max_tokens 1 (stage_cost.py's); the prompt cache is emptied before each.
+# before: main at fb669f8 (a two-frame Conv3d over two copies of each patch); after: the frame weights summed at load, one matmul over one frame.
+# one model at a time; no other locals process was running (pgrep before the first run); other GPU use was not checked.
+
+## patch_cost.py, before (locals from the frozen copy of fb669f8: <scratch>/before)
+locals from <scratch>/before/locals/__init__.py
+mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 42.66 ms (runs: 41.22, 46.66, 42.66, 42.41; 2 call(s) a request), patch_embed 28.71 ms (runs: 38.31, 32.00, 28.71, 27.06; 2 call(s) a request), positions 0.97 ms (runs: 0.72, 5.88, 0.97, 0.70; 1 call(s) a request), tower 1115.37 ms (runs: 1362.05, 1131.07, 1114.48, 1115.37; 1 call(s) a request), whole request 6546 ms (runs: 6904, 6576, 6546, 6546)
+positions shape (3, 5666), features (1000, 2560), (1024, 2560)
+saved <scratch>/before_q35_rerun_1.npz
+locals from <scratch>/before/locals/__init__.py
+mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 47.60 ms (runs: 39.07, 48.16, 43.23, 47.60; 2 call(s) a request), patch_embed 27.20 ms (runs: 40.69, 27.20, 27.69, 26.79; 2 call(s) a request), positions 0.90 ms (runs: 0.89, 1.39, 0.75, 0.90; 1 call(s) a request), tower 1119.75 ms (runs: 1399.05, 1120.82, 1119.75, 1116.23; 1 call(s) a request), whole request 6577 ms (runs: 6867, 6566, 6607, 6577)
+positions shape (3, 5666), features (1000, 2560), (1024, 2560)
+saved <scratch>/before_q35_rerun_2.npz
+locals from <scratch>/before/locals/__init__.py
+mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 50.63 ms (runs: 48.63, 50.63, 52.88, 47.45; 2 call(s) a request), patch_embed 30.83 ms (runs: 48.11, 30.83, 31.26, 29.95; 2 call(s) a request), positions 0.75 ms (runs: 0.66, 0.75, 0.98, 0.62; 1 call(s) a request), tower 1496.59 ms (runs: 4483.96, 1496.59, 1497.45, 1492.56; 1 call(s) a request), whole request 13222 ms (runs: 17997, 13693, 13222, 12842)
+positions shape (3, 5512), features (1000, 4096), (1024, 4096)
+saved <scratch>/before_vl8_rerun_1.npz
+locals from <scratch>/before/locals/__init__.py
+mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 40.95 ms (runs: 45.28, 45.12, 38.37, 40.95; 2 call(s) a request), patch_embed 29.79 ms (runs: 38.73, 29.36, 29.80, 29.79; 2 call(s) a request), positions 0.77 ms (runs: 0.67, 0.58, 1.25, 0.77; 1 call(s) a request), tower 1488.91 ms (runs: 4406.24, 1488.91, 1490.98, 1488.29; 1 call(s) a request), whole request 11732 ms (runs: 16027, 15650, 11732, 11722)
+positions shape (3, 5512), features (1000, 4096), (1024, 4096)
+saved <scratch>/before_vl8_rerun_2.npz
+
+## patch_cost.py, after (the working tree, this commit)
+locals from <repo>/locals/__init__.py
+mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 38.23 ms (runs: 35.10, 38.44, 37.33, 38.23; 2 call(s) a request), patch_embed 2.81 ms (runs: 3.22, 3.02, 2.81, 2.56; 2 call(s) a request), positions 1.22 ms (runs: 0.70, 1.22, 1.06, 1.26; 1 call(s) a request), tower 1059.57 ms (runs: 1173.36, 1058.53, 1059.57, 1063.03; 1 call(s) a request), whole request 6338 ms (runs: 6486, 6337, 6338, 6350)
+positions shape (3, 5666), features (1000, 2560), (1024, 2560)
+saved <scratch>/after2_q35_1.npz
+locals from <repo>/locals/__init__.py
+mlx-community/Qwen3.5-4B-MLX-4bit: preprocess 37.01 ms (runs: 35.74, 40.29, 36.16, 37.01; 2 call(s) a request), patch_embed 2.86 ms (runs: 3.12, 2.93, 2.86, 2.74; 2 call(s) a request), positions 0.86 ms (runs: 0.75, 1.01, 0.73, 0.86; 1 call(s) a request), tower 1079.98 ms (runs: 1098.67, 1078.05, 1083.85, 1079.98; 1 call(s) a request), whole request 6484 ms (runs: 6552, 6492, 6484, 6481)
+positions shape (3, 5666), features (1000, 2560), (1024, 2560)
+saved <scratch>/after2_q35_2.npz
+locals from <repo>/locals/__init__.py
+mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 40.01 ms (runs: 37.48, 42.09, 37.07, 40.01; 2 call(s) a request), patch_embed 3.15 ms (runs: 7.01, 3.79, 3.06, 3.15; 2 call(s) a request), positions 1.42 ms (runs: 0.59, 0.87, 1.55, 1.42; 1 call(s) a request), tower 1482.60 ms (runs: 4400.47, 1500.41, 1482.60, 1458.46; 1 call(s) a request), whole request 11713 ms (runs: 16462, 11930, 11713, 11692)
+positions shape (3, 5512), features (1000, 4096), (1024, 4096)
+saved <scratch>/after2_vl8_1.npz
+locals from <repo>/locals/__init__.py
+mlx-community/Qwen3-VL-8B-Instruct-4bit: preprocess 36.96 ms (runs: 44.35, 40.03, 36.45, 36.96; 2 call(s) a request), patch_embed 2.96 ms (runs: 5.13, 3.38, 2.94, 2.96; 2 call(s) a request), positions 0.56 ms (runs: 0.57, 0.56, 0.56, 1.17; 1 call(s) a request), tower 1458.35 ms (runs: 4386.32, 1458.35, 1456.77, 1458.43; 1 call(s) a request), whole request 12635 ms (runs: 16029, 12635, 12793, 11703)
+positions shape (3, 5512), features (1000, 4096), (1024, 4096)
+saved <scratch>/after2_vl8_2.npz
+
+## patch_compare.py: the unchanged code twice (the noise floor of the features), then before against after
+# Qwen3.5-4B: before run 1 against before run 2
+features0 (1000, 2560): max abs diff 0, mean abs diff 0, max abs value 9.141, 0 of 2560000 values differ
+features1 (1024, 2560): max abs diff 0, mean abs diff 0, max abs value 8.891, 0 of 2621440 values differ
+positions (3, 5666): the same array
+# Qwen3.5-4B: before run 1 against after runs 1 and 2
+features0 (1000, 2560): max abs diff 0.2305, mean abs diff 0.0007497, max abs value 9.141, 2471325 of 2560000 values differ
+features1 (1024, 2560): max abs diff 0.5459, mean abs diff 0.0006907, max abs value 8.891, 2529397 of 2621440 values differ
+positions (3, 5666): the same array
+features0 (1000, 2560): max abs diff 0.2305, mean abs diff 0.0007497, max abs value 9.141, 2471325 of 2560000 values differ
+features1 (1024, 2560): max abs diff 0.5459, mean abs diff 0.0006907, max abs value 8.891, 2529397 of 2621440 values differ
+positions (3, 5666): the same array
+# Qwen3-VL-8B: before run 1 against before run 2
+features0 (1000, 4096): max abs diff 0, mean abs diff 0, max abs value 4.578, 0 of 4096000 values differ
+features1 (1024, 4096): max abs diff 0, mean abs diff 0, max abs value 5.352, 0 of 4194304 values differ
+positions (3, 5512): the same array
+# Qwen3-VL-8B: before run 1 against after runs 1 and 2
+features0 (1000, 4096): max abs diff 0.1221, mean abs diff 0.00205, max abs value 4.578, 3994607 of 4096000 values differ
+features1 (1024, 4096): max abs diff 0.1113, mean abs diff 0.001943, max abs value 5.352, 4092564 of 4194304 values differ
+positions (3, 5512): the same array
+features0 (1000, 4096): max abs diff 0.1221, mean abs diff 0.00205, max abs value 4.578, 3994607 of 4096000 values differ
+features1 (1024, 4096): max abs diff 0.1113, mean abs diff 0.001943, max abs value 5.352, 4092564 of 4194304 values differ
+positions (3, 5512): the same array
+
+## patch_round.py: the patch embed's own output, bfloat16 weights as the files hold them, on the same two pictures
+locals from <repo>/locals/__init__.py
+conv weight (1024, 2, 16, 16, 3) mlx.core.bfloat16, bias (1024,) mlx.core.bfloat16
+grid (50, 80), 4000 patches, hidden 1024: largest exact output 7.737 (bfloat16 spacing there 0.03125); max abs diff from exact: two-frame conv in bfloat16 0.03173, summed matmul in bfloat16 0.02556; between the two 0.03125 (mean 0.0004361)
+grid (64, 64), 4096 patches, hidden 1024: largest exact output 7.549 (bfloat16 spacing there 0.03125); max abs diff from exact: two-frame conv in bfloat16 0.03414, summed matmul in bfloat16 0.02542; between the two 0.03125 (mean 0.000435)
+locals from <repo>/locals/__init__.py
+conv weight (1152, 2, 16, 16, 3) mlx.core.bfloat16, bias (1152,) mlx.core.bfloat16
+grid (50, 80), 4000 patches, hidden 1152: largest exact output 7.907 (bfloat16 spacing there 0.03125); max abs diff from exact: two-frame conv in bfloat16 0.03795, summed matmul in bfloat16 0.02633; between the two 0.03125 (mean 0.0003875)
+grid (64, 64), 4096 patches, hidden 1152: largest exact output 8.004 (bfloat16 spacing there 0.0625); max abs diff from exact: two-frame conv in bfloat16 0.03786, summed matmul in bfloat16 0.0261; between the two 0.03125 (mean 0.0003869)
+
+## patch_form.py: the patch embed by form, random weights, 2024 patches, hidden 1024, bfloat16
+transfer two frames (np -> mx, cast): median 0.88 ms (min 0.45)
+transfer one frame (np -> mx, cast): median 0.31 ms (min 0.30)
+conv3d 2 frames (resident input): median 6.11 ms (min 6.06)
+conv3d 1 frame (resident input): median 3.12 ms (min 3.11)
+linear 768 (resident input): median 0.67 ms (min 0.65)
+transfer + conv3d 2 frames: median 6.46 ms (min 6.40)
+transfer + linear 768: median 0.81 ms (min 0.78)
+
+## run_locals.py: the six pictures' questions (make_pictures.py), max_tokens 60, temperature 0, each asked twice; before (the frozen copy) against after, answers_compare.py
+# Qwen3.5-4B
+locals from <scratch>/before/locals/__init__.py
+locals from <repo>/locals/__init__.py
+encode calls 12, deepstack levels from the tower 0, used
+encode calls 12, deepstack levels from the tower 0, used
+cat42_640x400.png: same answers; before 'cat 2'; after 'cat 2'
+cat42_1280x800.png: same answers; before 'cat 42'; after 'cat 42'
+shapes_640x480.png: same answers; before 'From left to right, the shapes and their colors are:\n\n1. **R'; after 'From left to right, the shapes and their colors are:\n\n1. **R'
+invoice_900x500.png: same answers; before 'Based on the invoice details provided:\n\n- **Total:** 1,284.5'; after 'Based on the invoice details provided:\n\n- **Total:** 1,284.5'
+smallfont_512x256.png: same answers; before 'HELLO WORLD from a small font'; after 'HELLO WORLD from a small font'
+bars_768x512.png: same answers; before 'Looking at the bar chart:\n\n- **Bar A** is the shortest.\n- **'; after 'Looking at the bar chart:\n\n- **Bar A** is the shortest.\n- **'
+6 of 6 pictures: the same answers before and after
+# Qwen3-VL-8B
+locals from <scratch>/before/locals/__init__.py
+locals from <repo>/locals/__init__.py
+encode calls 6, deepstack levels from the tower 3, used
+encode calls 6, deepstack levels from the tower 3, used
+cat42_640x400.png: same answers; before 'c at a'; after 'c at a'
+cat42_1280x800.png: same answers; before 'catar'; after 'catar'
+shapes_640x480.png: same answers; before 'Based on the image provided, here are the shapes listed from'; after 'Based on the image provided, here are the shapes listed from'
+invoice_900x500.png: same answers; before 'Based on the invoice provided:\n\n*   **Total:** 1,284.50 PLN\n'; after 'Based on the invoice provided:\n\n*   **Total:** 1,284.50 PLN\n'
+smallfont_512x256.png: same answers; before 'HELLO WORLD from a small font'; after 'HELLO WORLD from a small font'
+bars_768x512.png: same answers; before "Based on the provided bar chart:\n\n- The bar labeled **'B'** "; after "Based on the provided bar chart:\n\n- The bar labeled **'B'** "
+6 of 6 pictures: the same answers before and after

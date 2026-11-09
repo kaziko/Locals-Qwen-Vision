@@ -8,7 +8,9 @@ the tower from the same files, lazily, and turns preprocessed pixels into the
 take.
 
 The arithmetic is transformers' ``Qwen3_5VisionModel``, step for step: 16x16
-patches over 2 frames through one convolution, a learned 36x36 position table
+patches through the patch embed (the reference's conv over 2 identical frames,
+here one matmul over one frame with the two frame weights summed at load:
+``PatchEmbed``, ``_patch_weight``), a learned 36x36 position table
 resampled bilinearly to the image's own grid, axial 2D rope over half the head
 dim, ``depth`` pre-norm blocks that attend within one image, then a 2x2 patch
 merger that narrows 1024 to the text model's 2560.
@@ -103,7 +105,7 @@ def vision_config(model_dir: Path) -> Optional[VisionConfig]:
         return None  # (a split that does not cover the rotated dims: vision.MRoPE would refuse it on the first image)
     out = VisionConfig.from_dict(v)
     if (out.patch_size, out.temporal_patch_size, out.spatial_merge_size) != (16, 2, 2):
-        return None  # (vision.preprocess cuts 16x16 patches over two frames, merged 2x2: other values, other tokens)
+        return None  # (vision.preprocess cuts 16x16 patches, merged 2x2; the frame weights' sum was checked at 2 frames only)
     out.mrope_section = tuple(section)
     return out
 
@@ -140,16 +142,17 @@ def _bilinear_pos(table: mx.array, side: int, h: int, w: int) -> mx.array:
 
 
 class PatchEmbed(nn.Module):
-    """One convolution over (2 frames, 16, 16, 3) patch vectors (MLX's NDHWC layout)."""
+    """The checkpoint's convolution over an image's (2 frames, 16, 16, 3) patches, as one matmul over (16, 16, 3): the
+    two frames are the same image, so the conv's two frame weights are summed when loaded (load_tower). On an M2 Max,
+    2,024 patches, random bfloat16 weights of this size, the pixels already on the GPU, outside a request: the two-frame
+    conv 6 ms, this matmul 0.7 ms; inside a request, the patch embed went from about 28 ms to about 3 ms
+    (docs/measurements/vision/results/patch_cost.txt)."""
 
     def __init__(self, cfg: VisionConfig):
-        self.shape = (cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size, cfg.in_channels)
-        self.proj = nn.Conv3d(cfg.in_channels, cfg.hidden_size,
-                              kernel_size=(cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size),
-                              stride=(cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size), bias=True)
+        self.proj = nn.Linear(cfg.patch_size * cfg.patch_size * cfg.in_channels, cfg.hidden_size, bias=True)
 
     def __call__(self, patches: mx.array) -> mx.array:
-        return self.proj(patches.reshape(-1, *self.shape)).reshape(patches.shape[0], -1)
+        return self.proj(patches)
 
 
 class VisionAttention(nn.Module):
@@ -236,7 +239,7 @@ class VisionTower(nn.Module):
 
     # -- one image ---------------------------------------------------------------------------
     def image(self, patches: mx.array, grid: Tuple[int, int]) -> Tuple[mx.array, List[mx.array]]:
-        """``patches``: (tokens, 2*16*16*3) pixels; ``grid``: (h, w) in 16-pixel patches. The image's
+        """``patches``: (tokens, 16*16*3) pixels; ``grid``: (h, w) in 16-pixel patches. The image's
         (tokens, out_hidden) features, and one more such block per deepstack layer (none for Qwen3.5)."""
         h, w = grid
         x = self.patch_embed(patches)
@@ -282,6 +285,21 @@ def _weights(path: Path) -> List[Tuple[str, mx.array]]:
     return out
 
 
+def _conv_layout(v: mx.array, cfg: VisionConfig) -> mx.array:
+    """The checkpoint's 5-D patch-embed conv weight in MLX's layout (out, frames, h, w, channels): transformers' is
+    (out, channels, frames, h, w); an mlx-vlm conversion (mlx-community's) is in MLX's already."""
+    if v.shape[1] == cfg.in_channels and v.shape[-1] != cfg.in_channels:
+        return v.transpose(0, 2, 3, 4, 1)
+    return v
+
+
+def _patch_weight(v: mx.array, cfg: VisionConfig) -> mx.array:
+    """The checkpoint's 5-D patch-embed conv weight as PatchEmbed's matmul weight, (out, 16*16*3): the frames are
+    summed, in float32 so the sum is rounded once, to the model's dtype in load_tower."""
+    v = _conv_layout(v, cfg)
+    return v.astype(mx.float32).sum(axis=1).reshape(v.shape[0], -1)
+
+
 def load_tower(model_dir: Path, dtype, cfg: VisionConfig) -> Optional[VisionTower]:
     """The tower for a checkpoint (``cfg``: its vision_config), its weights cast to the text model's dtype (None: the
     files hold no vision weights)."""
@@ -289,10 +307,7 @@ def load_tower(model_dir: Path, dtype, cfg: VisionConfig) -> Optional[VisionTowe
     if not weights:
         return None
     tower = VisionTower(cfg)
-    # transformers' layout (out, channels, frames, h, w) as MLX's (out, frames, h, w, channels); an mlx-vlm conversion
-    # (mlx-community's) is in MLX's already
-    weights = [(k, v.transpose(0, 2, 3, 4, 1) if k == "patch_embed.proj.weight" and v.ndim == 5
-                and v.shape[1] == cfg.in_channels and v.shape[-1] != cfg.in_channels else v) for k, v in weights]
+    weights = [(k, _patch_weight(v, cfg) if k == "patch_embed.proj.weight" and v.ndim == 5 else v) for k, v in weights]
     if dtype in (mx.float16, mx.bfloat16):
         weights = [(k, v.astype(dtype) if v.dtype in (mx.float16, mx.bfloat16, mx.float32) else v) for k, v in weights]
     tower.load_weights(weights)

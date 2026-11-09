@@ -52,9 +52,9 @@ GEMMA_PATCH, GEMMA_POOL, GEMMA_MAX_SOFT_TOKENS = 16, 3, 280
 @dataclass
 class Picture:
     """One image, preprocessed: ``patches`` (numpy, float32; None when only counted), one row of 16*16*3 pixels a
-    patch, or 2*16*16*3 for Qwen's two frames; the (h, w) patch grid; and ``key``, the image's id in prompt-cache
-    keys (``cache_key``: None, not cached). ``family`` says whose tower reads it and ``merge`` how many patches make
-    one text token (Qwen merges 2x2, Gemma pools 3x3)."""
+    patch; the (h, w) patch grid; and ``key``, the image's id in prompt-cache keys (``cache_key``: None, not cached).
+    ``family`` says whose tower reads it and ``merge`` how many patches make one text token (Qwen merges 2x2, Gemma
+    pools 3x3)."""
 
     patches: object
     grid: Tuple[int, int]
@@ -176,8 +176,8 @@ def measure(raw: bytes, family: str = QWEN) -> Picture:
 
 
 def preprocess(raw: bytes, family: str = QWEN) -> Picture:
-    """Image bytes -> the model's patch vectors. Qwen: 16x16 patches over two identical frames (an image is a
-    one-frame video), in spatial-merge order. Gemma: 16x16 patches in raster order, channels last inside a patch,
+    """Image bytes -> the model's patch vectors. Qwen: 16x16 patches in spatial-merge order, one row of pixels a
+    patch (what its ``PatchEmbed`` reads). Gemma: 16x16 patches in raster order, channels last inside a patch,
     rescaled to [0, 1] (its patch embedder applies ``2 * (pixel - 0.5)`` itself)."""
     import numpy as np
     from PIL import Image
@@ -199,8 +199,7 @@ def preprocess(raw: bytes, family: str = QWEN) -> Picture:
 
     pixels = np.asarray(im, dtype=np.float32) / 127.5 - 1.0  # (h, w, 3), mean/std 0.5
     hp, wp = hb // 16, wb // 16
-    x = pixels.reshape(hp // 2, 2, 16, wp // 2, 2, 16, 3).transpose(0, 3, 1, 4, 2, 5, 6).reshape(-1, 1, 16, 16, 3)
-    x = np.ascontiguousarray(np.broadcast_to(x, (x.shape[0], 2, 16, 16, 3)).reshape(x.shape[0], -1))
+    x = pixels.reshape(hp // 2, 2, 16, wp // 2, 2, 16, 3).transpose(0, 3, 1, 4, 2, 5, 6).reshape(-1, 16 * 16 * 3)
     return Picture(x, (hp, wp), _key(raw, (hp, wp)))
 
 
