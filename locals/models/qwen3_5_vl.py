@@ -103,7 +103,7 @@ def vision_config(model_dir: Path) -> Optional[VisionConfig]:
         return None  # (a split that does not cover the rotated dims: vision.MRoPE would refuse it on the first image)
     out = VisionConfig.from_dict(v)
     if (out.patch_size, out.temporal_patch_size, out.spatial_merge_size) != (16, 2, 2):
-        return None  # (vision.preprocess cuts 16x16 patches over two frames, merged 2x2: other values, other tokens)
+        return None  # (vision.preprocess cuts 16x16 patches, merged 2x2, PatchEmbed sums two frames: other values, other tokens)
     out.mrope_section = tuple(section)
     return out
 
@@ -140,16 +140,15 @@ def _bilinear_pos(table: mx.array, side: int, h: int, w: int) -> mx.array:
 
 
 class PatchEmbed(nn.Module):
-    """One convolution over (2 frames, 16, 16, 3) patch vectors (MLX's NDHWC layout)."""
+    """The checkpoint's convolution over an image's (2 frames, 16, 16, 3) patches, as one matmul over (16, 16, 3): the
+    two frames are the same image, so the conv's two frame weights are summed when loaded (load_tower). A conv over
+    two frames of 2,024 patches took 6 ms on an M2 Max; this matmul 0.7 ms (docs/measurements/vision/results/patch_cost.txt)."""
 
     def __init__(self, cfg: VisionConfig):
-        self.shape = (cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size, cfg.in_channels)
-        self.proj = nn.Conv3d(cfg.in_channels, cfg.hidden_size,
-                              kernel_size=(cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size),
-                              stride=(cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size), bias=True)
+        self.proj = nn.Linear(cfg.patch_size * cfg.patch_size * cfg.in_channels, cfg.hidden_size, bias=True)
 
     def __call__(self, patches: mx.array) -> mx.array:
-        return self.proj(patches.reshape(-1, *self.shape)).reshape(patches.shape[0], -1)
+        return self.proj(patches)
 
 
 class VisionAttention(nn.Module):
@@ -236,7 +235,7 @@ class VisionTower(nn.Module):
 
     # -- one image ---------------------------------------------------------------------------
     def image(self, patches: mx.array, grid: Tuple[int, int]) -> Tuple[mx.array, List[mx.array]]:
-        """``patches``: (tokens, 2*16*16*3) pixels; ``grid``: (h, w) in 16-pixel patches. The image's
+        """``patches``: (tokens, 16*16*3) pixels; ``grid``: (h, w) in 16-pixel patches. The image's
         (tokens, out_hidden) features, and one more such block per deepstack layer (none for Qwen3.5)."""
         h, w = grid
         x = self.patch_embed(patches)
@@ -293,6 +292,10 @@ def load_tower(model_dir: Path, dtype, cfg: VisionConfig) -> Optional[VisionTowe
     # (mlx-community's) is in MLX's already
     weights = [(k, v.transpose(0, 2, 3, 4, 1) if k == "patch_embed.proj.weight" and v.ndim == 5
                 and v.shape[1] == cfg.in_channels and v.shape[-1] != cfg.in_channels else v) for k, v in weights]
+    # the conv's frames summed (in float32: the sum is rounded once, to the model's dtype below), one row of
+    # (16, 16, 3) weights an output: PatchEmbed's matmul over one frame of pixels
+    weights = [(k, v.astype(mx.float32).sum(axis=1).reshape(v.shape[0], -1)
+                if k == "patch_embed.proj.weight" and v.ndim == 5 else v) for k, v in weights]
     if dtype in (mx.float16, mx.bfloat16):
         weights = [(k, v.astype(dtype) if v.dtype in (mx.float16, mx.bfloat16, mx.float32) else v) for k, v in weights]
     tower.load_weights(weights)

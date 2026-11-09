@@ -73,6 +73,27 @@ The output is `results/count_tokens.txt`.
 Both send four requests of about 5,600 tokens (text, a 1280x800 and a 1024x1024 picture) and print the medians of
 runs 2 to 4. Each line of the results is one process; each model and mode was run twice.
 
+## The patch embed and `positions` (`results/patch_cost.txt`, issue #26)
+
+```
+git archive fb669f8 locals | tar -x -C before                   # the code before: two frames a patch, a Conv3d over them
+PYTHONPATH=before <repo>/.venv/bin/python patch_cost.py <model> before_<m>_<n>.npz   # from a folder outside the repo (see above)
+<repo>/.venv/bin/python patch_cost.py <model> after_<m>_<n>.npz   # after: one frame a patch, the frame weights summed at load
+<repo>/.venv/bin/python patch_compare.py before_<m>_1.npz before_<m>_2.npz   # the unchanged code twice: the noise floor
+<repo>/.venv/bin/python patch_compare.py before_<m>_1.npz after_<m>_<n>.npz  # the tower's output, value for value
+<repo>/.venv/bin/python patch_round.py <model>                  # the patch embed's own output against the conv in float32
+<repo>/.venv/bin/python patch_form.py                           # the conv and the matmul alone, random weights
+PYTHONPATH=before <repo>/.venv/bin/python run_locals.py <model> pics tok_before_<m>.json   # the six questions, before
+<repo>/.venv/bin/python run_locals.py <model> pics tok_after_<m>.json                      # and after
+```
+
+`patch_cost.py` sends `stage_cost.py`'s request and times, inside it, `vision.preprocess` (the HTTP thread), the tower's
+patch embed alone (evaluated on its own, so its time is its own plus the pixels' copy to the GPU), `vision.positions`
+(evaluated), the whole tower and the whole request; the prompt cache is emptied before each request, so every run runs
+the tower. With a file name it saves the last run's tower features and positions, which `patch_compare.py` compares
+between two builds. Each build was run twice per model, one model at a time, nothing else on the GPU. Both scripts
+print which `locals` they imported. The 8B model's files are in a cache on another drive (`HF_HUB_CACHE`).
+
 ## A follow-up turn about the same images (`results/turn2_cost.txt`)
 
 ```

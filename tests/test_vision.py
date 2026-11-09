@@ -77,11 +77,35 @@ def test_patches_are_in_spatial_merge_order():
     buf = io.BytesIO()
     Image.fromarray(arr).save(buf, "PNG")
     pic = vision.preprocess(buf.getvalue())
-    assert pic.grid == (16, 20) and pic.patches.shape == (320, 2 * 16 * 16 * 3)
-    first = pic.patches.reshape(320, 2, 16, 16, 3)[:, 0, 0, 0, :2]  # each patch's first pixel, R and G
+    assert pic.grid == (16, 20) and pic.patches.shape == (320, 16 * 16 * 3)
+    first = pic.patches.reshape(320, 16, 16, 3)[:, 0, 0, :2]  # each patch's first pixel, R and G
     coords = np.rint((first + 1.0) * 127.5 / 10).astype(int)
     want = [(br * 2 + ir, bc * 2 + ic) for br in range(8) for bc in range(10) for ir in range(2) for ic in range(2)]
     assert [tuple(c) for c in coords] == want
+
+
+def test_a_qwen_tower_reads_one_frame_as_the_checkpoints_conv_read_two(tmp_path):
+    """The checkpoint's patch embed is a conv over two identical frames of an image (transformers' layout). The tower
+    loads it summed over the frames and reads one frame of pixels: the conv's own output, up to rounding."""
+    from mlx.utils import tree_flatten
+
+    from locals.models.qwen3_5_vl import VisionConfig, VisionTower, load_tower
+
+    cfg = VisionConfig(depth=1, hidden_size=32, intermediate_size=64, num_heads=4, num_position_embeddings=16,
+                       out_hidden_size=24)
+    rng = np.random.default_rng(3)
+    w = mx.array(rng.standard_normal((32, 3, 2, 16, 16)).astype(np.float32))  # (out, channels, frames, h, w)
+    b = mx.array(rng.standard_normal((32,)).astype(np.float32))
+    weights = {"model.visual." + k: v for k, v in tree_flatten(VisionTower(cfg).parameters())}
+    weights["model.visual.patch_embed.proj.weight"], weights["model.visual.patch_embed.proj.bias"] = w, b
+    mx.save_safetensors(str(tmp_path / "model.safetensors"), weights)
+
+    tower = load_tower(tmp_path, mx.float32, cfg)
+    one = mx.array(rng.standard_normal((24, 16 * 16 * 3)).astype(np.float32))  # a 4x6 grid, one frame a patch
+    two = mx.broadcast_to(one.reshape(24, 1, 16, 16, 3), (24, 2, 16, 16, 3))
+    want = mx.conv3d(two, w.transpose(0, 2, 3, 4, 1), stride=(2, 16, 16)).reshape(24, -1) + b
+    assert np.allclose(np.array(tower.patch_embed(one)), np.array(want), atol=1e-4)
+    assert tower.image(one, (4, 6))[0].shape == (6, 24)
 
 
 def test_smart_resize_keeps_the_trained_sizes():
@@ -231,7 +255,7 @@ def test_anthropic_images_become_image_parts():
     ("qwen3_5", {"hidden_size": 1024}, {"head_dim": 256, "rope_parameters": {"mrope_section": [24, 20, 20], "partial_rotary_factor": 0.25}}, False),
     ("qwen3_vl", {"hidden_size": 1152}, {"head_dim": 128, "rope_scaling": {"rope_type": "default"}}, False),
     ("qwen3_vl", {"hidden_size": 1152}, {"head_dim": 128, "rope_scaling": {"mrope_interleaved": False, "mrope_section": [24, 20, 20]}}, False),
-    # other patch values: vision.preprocess cuts 16x16 patches over two frames, and the merger takes 2x2 of them
+    # other patch values: vision.preprocess cuts 16x16 patches, the patch embed sums two frames, the merger takes 2x2
     ("qwen3_vl", {"hidden_size": 1152, "patch_size": 14},
      {"head_dim": 128, "rope_scaling": {"mrope_interleaved": True, "mrope_section": [24, 20, 20]}}, False),
     ("qwen3_vl", {"hidden_size": 1152, "spatial_merge_size": 4},
