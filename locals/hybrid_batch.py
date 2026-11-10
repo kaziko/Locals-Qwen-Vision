@@ -271,12 +271,14 @@ def _keep_reply_state(r, n: int, cache) -> None:
 
 def _reply_entry(r, row):
     """The prompt-cache entry for ``r.prompt[:n]`` (see _keep_reply_state): the finished row's KV cut
-    to n positions (views of its buffers: no copy) and the recurrent state kept at n. None if the
-    request kept none or a layer is of another kind (a rotating window cannot be cut back)."""
+    to n positions (views of its buffers: no copy) and the recurrent state kept at n, with the hidden state at n - 1
+    for the MTP entry's hole there (_resume_entry). None if the request kept none or a layer is of another kind (a
+    rotating window cannot be cut back)."""
     state = getattr(r, "reply_state", None)
     if state is None:
         return None
     n, kept = state
+    end = getattr(r, "reply_end", None)
     out = []
     for c, k in zip(row, kept):
         if k is not None:
@@ -287,6 +289,8 @@ def _reply_entry(r, row):
             out.append(v)
         else:
             return None
+    if end is not None and end[0] == n - 1:
+        out[-1].locals_end = end  # (the MTP entry's, kept at the checkpoint: _keep_reply)
     return out
 
 
@@ -561,7 +565,7 @@ def _nexts(seq: List[int], i: int, k: int, after: Optional[int] = None) -> List[
     MTP entry (locals/mtp.py) takes the layer's KV at the positions they cover and holes at the rest. A cache never
     holds anything of a token past its own end where it is kept (a checkpoint, a shared-prefix snapshot, a reply):
     that token is not in its key, so ``after`` is given only where the read ends at the token the first decode step
-    feeds."""
+    feeds. The hole a kept cache ends with is filled when a read goes on from it (_resume_entry)."""
     out = list(seq[i + 1 : i + k + 1])
     if after is not None and i < len(seq) <= i + k:
         out.append(after)
@@ -714,14 +718,39 @@ class HybridBatchEngine(BatchEngine):
 
     def _write_entry(self, e, h: mx.array, nexts=None) -> None:
         """The MTP entry's next L positions, for hidden states ``h`` (B, L, D): the layer's KV where ``nexts`` (per row)
-        gives the token after a position, holes elsewhere."""
+        gives the token after a position, holes elsewhere. A single-stream entry also keeps ``locals_end``: (its last
+        position, ``h`` there) where a prompt read (``nexts`` given) left that slot a hole, else None."""
         B, L = h.shape[0], h.shape[1]
         if not nexts or not any(nexts):
             self.mtp.holes(e, B, L)
+        else:
+            nx = mx.array([list(n[:L]) + [0] * (L - len(n[:L])) for n in nexts], dtype=mx.int32)
+            fl = mx.array([[j < len(n) for j in range(L)] for n in nexts])
+            self.mtp.fill(e, h, nx, fl)
+        # a read that ends before the token after its last position is known (a checkpoint, a snapshot, a prompt-cache
+        # entry): its hidden state goes with the entry (deep copies of it too) for _resume_entry; a decode step's
+        # (nexts None) does not: _stash keeps that one
+        ends = nexts is not None and B == 1 and type(e) is KVCache and len(nexts[0]) < L
+        e.locals_end = (_write_at(e) - 1, h[:, -1:, :]) if ends else None
+
+    def _resume_entry(self, cache, nxt: Optional[int]) -> None:
+        """A single-stream cache's read goes on with ``nxt``, the token after its last position: the entry's hole there
+        (_write_entry) gets the layer's KV, from the hidden state the read that ended there kept (issue #29)."""
+        e = self._entry(cache)
+        st = getattr(e, "locals_end", None)
+        if st is None or nxt is None:
             return
-        nx = mx.array([list(n[:L]) + [0] * (L - len(n[:L])) for n in nexts], dtype=mx.int32)
-        fl = mx.array([[j < len(n) for j in range(L)] for n in nexts])
-        self.mtp.fill(e, h, nx, fl)
+        e.locals_end = None
+        pos, h = st
+        if pos != _write_at(e) - 1:  # (trimmed, or written past since)
+            return
+        self._fill_last(e, h, nxt)
+
+    def _fill_last(self, entry, h: mx.array, x: int) -> mx.array:
+        """The entry's last slot, a hole, gets the layer's KV for hidden state ``h`` (1, 1, D) there with ``x`` as the
+        token after it. Returns the layer's output there."""
+        entry.trim(1)
+        return self.mtp.fill(entry, h, mx.array([[x]], dtype=mx.int32), mx.ones((1, 1), dtype=mx.bool_))
 
     # -- prefill with prefix snapshots -------------------------------------------------
     def _prefill(self, tokens: List[int], others: List[List[int]], tail_ok: int = 0):
@@ -893,6 +922,12 @@ class HybridBatchEngine(BatchEngine):
 
     def _keep_reply(self, r, n: int, cache) -> None:
         _keep_reply_state(r, n, cache)
+        # the reply entry will be a view of the row cut to n: the row's slot n - 1 stays a hole (filled, it would hold
+        # the token after the entry's end), and the hidden state there goes to the entry instead (_reply_entry)
+        e = self._entry(cache)
+        r.reply_end = getattr(e, "locals_end", None)
+        if e is not None:
+            e.locals_end = None
         self._reply_bytes = max(self._reply_bytes, sum(c.nbytes for c in r.reply_state[1] if c is not None))
 
     def _room_for_copy(self, lru, positions: int) -> bool:
@@ -972,6 +1007,8 @@ class HybridBatchEngine(BatchEngine):
                 c, rest = self._prefill_start(p, others + prompts[i + 1 :])
             caches.append(c)
             rests.append(list(rest))
+            nxt = rest[0] if rest else (None if afters is None else afters[i])  # (the token after the cached part)
+            self._resume_entry(c, nxt)
         busy = [i for i, r in enumerate(rests) if r]
         if busy and len(busy) < len(rests) and not (len(caches) == 1):
             # Rows whose whole prompt is a shared snapshot (the second of two requests with one prompt)
@@ -1079,6 +1116,7 @@ class HybridBatchEngine(BatchEngine):
         False if ``stop()`` (asked between chunks) gave it up. ``after``: the token that follows ``toks``, if it is
         known and may be read into the cache's MTP entry (_nexts)."""
         done, i = _cached(cache), 0
+        self._resume_entry(cache, toks[0] if toks else after)
         while i < len(toks):
             n = prefill_chunk(done + i, 1, self.prefill_tokens or chunk, self._prefill_scores, self._prefill_cap)
             a0 = mx.get_active_memory()
@@ -1412,9 +1450,7 @@ class HybridBatchEngine(BatchEngine):
         e0, pos, h = st
         if e0 is not entry or pos != at - 1:
             return
-        entry.trim(1)
-        out = self.mtp.fill(entry, h, mx.array([[x]], dtype=mx.int32), mx.ones((1, 1), dtype=mx.bool_))
-        r.mtp_out, r.mtp_at = out, at
+        r.mtp_out, r.mtp_at = self._fill_last(entry, h, x), at
 
     def _mtp_draft(self, r, entry, constrained: bool) -> List[int]:
         """The MTP layer's draft (LOCALS_MTP_DRAFTS tokens) from its output at the last position, with the checks a
@@ -2069,6 +2105,7 @@ class HybridBatchEngine(BatchEngine):
         else:  # the prompt's hidden states for its MTP entry: the token after each is known, but past a checkpoint
             h, hp = forward(self.lm.model, x[:, None], cache, mx.array([r.prompt[e["pos"]: e["pos"] + n]]), c, prompt_hidden=True)
             upto = r.prompt[:stop + 1] if stop == e["end"] else r.prompt[:stop]
+            self._resume_entry(c, r.prompt[e["pos"]])
             self._write_entry(ep, hp, [_nexts(upto, e["pos"], n)])
         if ed is not None:
             self.mtp.holes(ed, int(x.shape[0]), 1)
@@ -2395,7 +2432,7 @@ class HybridBatchEngine(BatchEngine):
                     # differently from the open turn, so the row is no prefix of the next request; and its KV,
                     # views of the row's buffers, would count twice in the prompt cache's bytes next to the row
                     lru.insert_cache(lru_key, list(key[: r.reply_state[0]]), reply, cache_type="assistant")
-                r.reply_state = None
+                r.reply_state = r.reply_end = None
             if on_done is not None:
                 on_done(r)
 
