@@ -24,7 +24,7 @@ import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 import mlx.core as mx
 
@@ -46,7 +46,23 @@ PLACEHOLDERS = {QWEN: (IMAGE_TOKEN, None, None), GEMMA: (GEMMA_IMAGE_MARK, "<|im
 # 65,536 patches): a 2880x1800 screenshot was 5,000 tokens. 1M pixels is 1,024 tokens.
 MAX_PIXELS = 1 << 20
 # Gemma 4's processor: 16-pixel patches pooled 3x3, at most 280 soft tokens, both sides a multiple of 48.
-GEMMA_PATCH, GEMMA_POOL, GEMMA_MAX_SOFT_TOKENS = 16, 3, 280
+PATCH = 16  # both towers' patch side, in pixels
+GEMMA_PATCH, GEMMA_POOL, GEMMA_MAX_SOFT_TOKENS = PATCH, 3, 280
+
+
+class _Cut(NamedTuple):
+    """How preprocess cuts a family's image and measure counts it."""
+    divisor: float  # pixel = value / divisor - offset: Qwen's mean and std 0.5; Gemma's [0, 1] (its patch
+    offset: float   # embedder applies 2 * (pixel - 0.5) itself)
+    m: int          # patches taken in m x m blocks: Qwen's 2x2 spatial merge; m = 1 is raster order
+    merge: int      # the patches one text token stands for
+
+
+_CUTS = {QWEN: _Cut(127.5, 1.0, 2, 4), GEMMA: _Cut(255.0, 0.0, 1, GEMMA_POOL**2)}
+
+
+def _family(family: str) -> str:
+    return GEMMA if family == GEMMA else QWEN  # (any other family is cut as Qwen, as _resized sizes it)
 
 
 @dataclass
@@ -170,9 +186,8 @@ def measure(raw: bytes, family: str = QWEN) -> Picture:
     with Image.open(io.BytesIO(raw)) as im:
         w, h = im.size
     hb, wb = _resized(h, w, family)
-    patch, merge = (GEMMA_PATCH, GEMMA_POOL**2) if family == GEMMA else (16, 4)
-    grid = (hb // patch, wb // patch)
-    return Picture(None, grid, _key(raw, grid), family, merge)
+    grid = (hb // PATCH, wb // PATCH)
+    return Picture(None, grid, _key(raw, grid), family, _CUTS[_family(family)].merge)
 
 
 def preprocess(raw: bytes, family: str = QWEN) -> Picture:
@@ -191,16 +206,16 @@ def preprocess(raw: bytes, family: str = QWEN) -> Picture:
 
     # numpy, not MLX: this runs in the HTTP thread, and an MLX array made there is computed on that thread's
     # stream, which the engine's thread cannot use ("There is no Stream(gpu, 2) in current thread")
-    if family == GEMMA:
-        pixels = np.asarray(im, dtype=np.float32) / 255.0  # (h, w, 3)
-        hp, wp = hb // GEMMA_PATCH, wb // GEMMA_PATCH
-        x = pixels.reshape(hp, GEMMA_PATCH, wp, GEMMA_PATCH, 3).transpose(0, 2, 1, 3, 4).reshape(-1, 16 * 16 * 3)
-        return Picture(np.ascontiguousarray(x, dtype=np.float32), (hp, wp), _key(raw, (hp, wp)), GEMMA, GEMMA_POOL**2)
-
-    pixels = np.asarray(im, dtype=np.float32) / 127.5 - 1.0  # (h, w, 3), mean/std 0.5
-    hp, wp = hb // 16, wb // 16
-    x = pixels.reshape(hp // 2, 2, 16, wp // 2, 2, 16, 3).transpose(0, 3, 1, 4, 2, 5, 6).reshape(-1, 16 * 16 * 3)
-    return Picture(x, (hp, wp), _key(raw, (hp, wp)))
+    fam = _family(family)
+    cut = _CUTS[fam]
+    pixels = np.asarray(im, dtype=np.float32)  # (h, w, 3); in place: one image-sized array, not three
+    pixels /= cut.divisor
+    if cut.offset:
+        pixels -= cut.offset
+    hp, wp, m = hb // PATCH, wb // PATCH, cut.m
+    x = pixels.reshape(hp // m, m, PATCH, wp // m, m, PATCH, 3).transpose(0, 3, 1, 4, 2, 5, 6)
+    x = x.reshape(-1, PATCH * PATCH * 3)
+    return Picture(np.ascontiguousarray(x, dtype=np.float32), (hp, wp), _key(raw, (hp, wp)), fam, cut.merge)
 
 
 NO_FILES = "this server reads no files of its own for an image: send the image's bytes (a data URL)"

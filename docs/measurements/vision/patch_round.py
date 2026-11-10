@@ -3,17 +3,16 @@ the two pictures stage_cost.py sends. Three outputs over the same pixels: the ch
 bfloat16 (the code before), the summed-weight matmul in bfloat16 (the code now, the loaded tower's), and the conv in
 float32 (the exact value both round). Each bfloat16 output's max abs difference from the float32 one, the two
 bfloat16 outputs' from each other, and bfloat16's spacing at the largest output, for scale."""
-import base64
-import io
 import sys
 
 import mlx.core as mx
 import numpy as np
-from PIL import Image
 
 import locals as L
 from locals import vision
 from locals.models import qwen3_5_vl as q
+
+import request
 
 model_id = sys.argv[1]
 print("locals from", L.__file__, flush=True)
@@ -26,25 +25,13 @@ w5 = q._conv_layout(ws["patch_embed.proj.weight"], cfg)  # MLX's (out, frames, h
 b = ws["patch_embed.proj.bias"]
 print(f"conv weight {w5.shape} {w5.dtype}, bias {b.shape} {b.dtype}", flush=True)
 
-rng = np.random.default_rng(0)
-
-
-def pic(w, h):
-    y, x = np.mgrid[0:h, 0:w]
-    a = np.stack([(x * 255 // w), (y * 255 // h), ((x + y) * 127 // (w + h))], -1).astype(np.int16)
-    a = np.clip(a + rng.integers(-20, 20, a.shape), 0, 255).astype(np.uint8)
-    buf = io.BytesIO()
-    Image.fromarray(a).save(buf, "PNG")
-    return buf.getvalue()
-
-
 def conv(x1, dtype):
     n = x1.shape[0]
     x2 = mx.broadcast_to(x1.reshape(n, 1, 16, 16, 3), (n, 2, 16, 16, 3)).astype(dtype)
     return mx.conv3d(x2, w5.astype(dtype), stride=(2, 16, 16)).reshape(n, -1) + b.astype(dtype)
 
 
-for raw in (pic(1280, 800), pic(1024, 1024)):
+for raw in request.pictures():
     p = vision.preprocess(raw)
     x1 = mx.array(p.patches)  # float32 pixels
     exact = conv(x1, mx.float32)

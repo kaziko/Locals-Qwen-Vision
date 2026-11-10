@@ -71,7 +71,9 @@ The output is `results/count_tokens.txt`.
 ```
 
 Both send four requests of about 5,600 tokens (text, a 1280x800 and a 1024x1024 picture) and print the medians of
-runs 2 to 4. Each line of the results is one process; each model and mode was run twice.
+runs 2 to 4. That request is in `request.py`, which `stage_cost.py`, `mrope_cost.py`, `turn2_cost.py`,
+`patch_cost.py` and `patch_round.py` import from this folder: a script run from a copy needs `request.py`
+beside it. Each line of the results is one process; each model and mode was run twice.
 
 ## The patch embed and `positions` (`results/patch_cost.txt`, issue #26)
 
@@ -85,12 +87,12 @@ PYTHONPATH=before <repo>/.venv/bin/python patch_cost.py <model> before_<m>_<n>.n
 <repo>/.venv/bin/python patch_form.py                           # the conv and the matmul alone, random weights
 PYTHONPATH=before <repo>/.venv/bin/python run_locals.py <model> pics tok_before_<m>.json   # the six questions, before
 <repo>/.venv/bin/python run_locals.py <model> pics tok_after_<m>.json                      # and after
-<repo>/.venv/bin/python answers_compare.py tok_before_<m>.json tok_after_<m>.json
+<repo>/.venv/bin/python answers_compare.py tok_before_<m>.json tok_after_<m>.json   # exits 1 if any picture differs
 ```
 
-`patch_cost.py` sends `stage_cost.py`'s request and times, inside it, `vision.preprocess` (the HTTP thread), the tower's
-patch embed alone (evaluated on its own, so its time is its own plus the pixels' copy to the GPU), `vision.positions`
-(evaluated), the whole tower and the whole request; the prompt cache is emptied before each request, so every run runs
+`patch_cost.py` sends `stage_cost.py`'s request (both take it from `request.py`) and times, inside it,
+`vision.preprocess` (the HTTP thread), the tower's patch embed alone (evaluated on its own, so its time is its own plus
+the pixels' copy to the GPU), `vision.positions` (evaluated), the whole tower and the whole request; the prompt cache is emptied before each request, so every run runs
 the tower. With a file name it saves the last run's tower features and positions, which `patch_compare.py` compares
 between two builds; `answers_compare.py` compares two `run_locals.py` outputs answer for answer. Each build was run
 twice per model, one model at a time, no other locals process running. `patch_cost.py`, `patch_round.py` and

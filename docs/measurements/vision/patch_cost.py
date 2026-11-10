@@ -3,20 +3,19 @@
 patch embed alone (its conv, evaluated on its own), vision.positions (the prompt's M-RoPE positions, evaluated), the
 whole tower, and the whole request. Medians of runs 2-4. With OUT.npz, the last run's tower features and positions
 are saved, so two builds of the code can be compared value for value."""
-import base64
-import io
 import statistics
 import sys
 import time
 
 import mlx.core as mx
 import numpy as np
-from PIL import Image
 
 import locals as L
 from locals import vision
 from locals.models import qwen3_5_vl as q
 from locals.server import Server
+
+import request
 
 model_id = sys.argv[1]
 out = sys.argv[2] if len(sys.argv) > 2 else None
@@ -25,25 +24,10 @@ print("locals from", L.__file__, flush=True)
 stages = {"preprocess": [], "patch_embed": [], "positions": [], "tower": []}
 saved = {"features": [], "positions": None}
 
-
-def timer(key, f, sync):
-    def w(*a, **k):
-        if sync:
-            mx.synchronize()
-        t = time.perf_counter()
-        r = f(*a, **k)
-        if sync:
-            mx.eval(r)
-            mx.synchronize()
-        stages[key].append(time.perf_counter() - t)
-        return r
-    return w
-
-
-vision.preprocess = timer("preprocess", vision.preprocess, False)
-q.PatchEmbed.__call__ = timer("patch_embed", q.PatchEmbed.__call__, True)
-timed_positions = timer("positions", vision.positions, True)
-timed_encode = timer("tower", vision.Encoder.encode, True)  # encode evals its outputs itself: the eval here is a no-op
+vision.preprocess = request.timer(stages, "preprocess", vision.preprocess, False)
+q.PatchEmbed.__call__ = request.timer(stages, "patch_embed", q.PatchEmbed.__call__, True)
+timed_positions = request.timer(stages, "positions", vision.positions, True)
+timed_encode = request.timer(stages, "tower", vision.Encoder.encode, True)  # encode evals its outputs itself: the eval here is a no-op
 
 
 def encode(self, pictures):
@@ -63,26 +47,11 @@ def positions(*a, **k):
 
 vision.positions = positions
 
-rng = np.random.default_rng(0)
-
-
-def pic(w, h):
-    y, x = np.mgrid[0:h, 0:w]
-    a = np.stack([(x * 255 // w), (y * 255 // h), ((x + y) * 127 // (w + h))], -1).astype(np.int16)
-    a = np.clip(a + rng.integers(-20, 20, a.shape), 0, 255).astype(np.uint8)
-    b = io.BytesIO()
-    Image.fromarray(a).save(b, "PNG")
-    return {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()}}
-
-
-filler = "".join(f"Line {i}: the parcel {i * 7919 % 10007} left the depot at {i % 24:02d}:{i * 13 % 60:02d}.\n" for i in range(150))
-parts = [{"type": "text", "text": filler}, pic(1280, 800), pic(1024, 1024), {"type": "text", "text": "Describe both pictures."}]
+req = request.request()
 srv = Server(model_id, engines=("locals",), preload=("locals",))
-req = {"model": "locals", "max_tokens": 1, "temperature": 0, "messages": [{"role": "user", "content": parts}]}
 whole = []
 for _ in range(4):
-    if srv.service("locals")._lru is not None:  # a cached prompt is read no further: empty the prompt cache first
-        srv.service("locals")._lru.trim_to(n_sequences=0)
+    request.empty_cache(srv)  # every run runs the tower
     t = time.perf_counter()
     srv.complete(req)
     whole.append(time.perf_counter() - t)
