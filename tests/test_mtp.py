@@ -70,7 +70,11 @@ def _engine(tiny, mtp=None):
 def _serve(eng, reqs, lru=None, **kw):
     from locals.packed import Request
 
-    reqs = [Request(list(p), _free(), n, **kw) for p, n in reqs]
+    return _serve_reqs(eng, [Request(list(p), _free(), n, **kw) for p, n in reqs], lru)
+
+
+def _serve_reqs(eng, reqs, lru=None):
+    """Serve the requests ``reqs``, all arriving at once."""
     waiting = list(reqs)
 
     def source(block):
@@ -595,3 +599,167 @@ def test_the_back_off_is_off_in_the_pipelined_loop_and_on_in_the_other_by_defaul
     eng.mtp_pipelined = True
     assert eng._mtp_backoff_on()
     assert _engine(tiny)._mtp_backoff_on()  # (MTP off: the setting is moot, and reads as the loop that reads every pass)
+
+
+def _with_checkpoint(prompt, n, cp, kind="user"):
+    """A request whose prompt cache is also kept at ``cp`` (a checkpoint)."""
+    from locals.packed import Request
+
+    r = Request(list(prompt), _free(), n)
+    r.checkpoints = [(cp, kind)]
+    return r
+
+
+def _slot(entry, i):
+    """The layer's keys and values at slot ``i`` of a single-row MTP entry (the keys without their flag column)."""
+    return entry.keys[0, :, i, :-1].astype(mx.float32), entry.values[0, :, i, :].astype(mx.float32)
+
+
+def _same_slot(a, b, i):
+    """Slot ``i`` of two entries holds the same KV, up to the rounding of reads cut into other chunks."""
+    for x, y in zip(_slot(a, i), _slot(b, i)):
+        assert mx.allclose(x, y, rtol=2e-2, atol=2e-2).item(), mx.abs(x - y).max().item()
+
+
+def _cold_row(tiny, mtp_file, prompt, n):
+    """The prompt cache a request leaves read with no checkpoint, from nothing cached: the slots as one read fills
+    them."""
+    from locals.mtp import MTP
+
+    lru = _lru()
+    (r,) = _serve(_engine(tiny, MTP.load(tiny, mtp_file)), [(prompt, n)], lru)
+    return lru.fetch_nearest_cache("locals", prompt + r.out + [0] * 20)[0]
+
+
+def test_a_read_that_goes_on_past_a_checkpoint_has_no_hole_there(tiny, mtp_file):
+    """The kept cache at a checkpoint holds nothing about the token after its end (its last slot is a hole), but the
+    read that goes on knows that token: the request's own cache has the layer's KV there (issue #29, item 2)."""
+    from locals.mtp import MTP
+
+    cp = 12
+    (off,) = _serve_reqs(_engine(tiny), [_with_checkpoint(LONG, 3, cp)], _lru())
+    lru = _lru()
+    (r,) = _serve_reqs(_engine(tiny, MTP.load(tiny, mtp_file)), [_with_checkpoint(LONG, 3, cp)], lru)
+    assert r.out == off.out
+    kept = lru.fetch_nearest_cache("locals", LONG[:cp])[0]
+    assert _offsets(kept) == [cp, cp]
+    assert _real(kept[-1]) == [1] * (cp - 1) + [0]
+    row = lru.fetch_nearest_cache("locals", LONG + r.out + [0] * 20)[0]
+    assert _real(row[-1])[: len(LONG) - 1] == [1] * (len(LONG) - 1)
+    _same_slot(row[-1], _cold_row(tiny, mtp_file, LONG, 3)[-1], cp - 1)  # (the hidden state there, and the token after)
+
+
+@pytest.mark.parametrize("more", [[77, 78, 79], [77]], ids=["tokens to read", "only the token fed next"])
+def test_a_turn_from_a_kept_checkpoint_has_no_hole_where_it_ended(tiny, mtp_file, more):
+    """A prompt-cache hit (an agent turn from the checkpoint the turn before kept): the entry gets a real slot at the
+    position where the cached prompt ended, and the reply is MTP off's (issue #29, item 2)."""
+    from locals.mtp import MTP
+
+    cp = 12
+
+    def run(mtp):
+        lru = _lru()
+        eng = _engine(tiny, mtp)
+        _serve_reqs(eng, [_with_checkpoint(LONG, 3, cp)], lru)
+        (b,) = _serve(eng, [(LONG[:cp] + more, 6)], lru)
+        return lru, b
+
+    _, b0 = run(None)
+    lru, b1 = run(MTP.load(tiny, mtp_file))
+    assert b1.out == b0.out
+    assert b1.cached_tokens == cp
+    row = lru.fetch_nearest_cache("locals", b1.prompt + b1.out + [0] * 20)[0]
+    assert _real(row[-1])[: len(b1.prompt) - 1] == [1] * (len(b1.prompt) - 1)
+    _same_slot(row[-1], _cold_row(tiny, mtp_file, b1.prompt, 6)[-1], cp - 1)
+
+
+def test_a_prompt_read_in_mixed_passes_past_a_checkpoint_has_no_hole_there(tiny, mtp_file):
+    """The same as a read that goes on past a checkpoint in one go, a chunk at a time beside a decoding row
+    (locals/mixed.py): the kept cache's last slot is a hole, the request's own is not, and the replies are MTP off's."""
+    from locals.mtp import MTP
+    from locals.packed import Request
+
+    longp = [(7 * i) % 400 + 3 for i in range(90)]
+    cp = 40
+
+    def run(mtp):
+        lru = _lru()
+        eng = _engine(tiny, mtp)
+        eng.mix_chunk = 16
+        first = Request(list(LONG), _free(), 60)
+        second = _with_checkpoint(longp, 10, cp)
+        sent = []
+
+        def source(block):
+            if not sent:
+                sent.append(1)
+                return [first]
+            if len(sent) == 1 and len(first.out) >= 2:
+                sent.append(1)
+                return [second]
+            return []
+
+        eng.serve(source, lru=lru)
+        return lru, eng, first, second
+
+    _, _, f0, s0 = run(None)
+    lru, eng, f1, s1 = run(MTP.load(tiny, mtp_file))
+    assert (f1.out, s1.out) == (f0.out, s0.out)
+    assert eng.counters.get("mixed_steps", 0) > 0
+    kept = lru.fetch_nearest_cache("locals", longp[:cp])[0]
+    assert _real(kept[-1]) == [1] * (cp - 1) + [0]
+    cache = lru.fetch_nearest_cache("locals", longp + s1.out + [0] * 20)[0]
+    assert _real(cache[-1])[: len(longp) - 1] == [1] * (len(longp) - 1)
+
+
+def test_rows_read_on_from_a_shared_prefix_snapshot_have_no_hole_there(tiny, mtp_file):
+    """Two requests with one prefix: the shared-prefix snapshot's last slot is a hole, each row's is not, and the
+    replies are MTP off's (issue #29, item 2)."""
+    from locals.hybrid_batch import HybridBatchEngine
+    from locals.mtp import MTP
+
+    a, b = LONG + [60, 61, 62], LONG + [70, 71]
+
+    def run(mtp):
+        lru = _lru()
+        eng = HybridBatchEngine(tiny, Tok(), n_slots=4, share_prefix=True, mtp=mtp)
+        eng.min_share = 8
+        got = _serve(eng, [(a, 4), (b, 4)], lru)
+        return lru, eng, got
+
+    _, _, ref = run(None)
+    lru, eng, got = run(MTP.load(tiny, mtp_file))
+    assert [r.out for r in got] == [r.out for r in ref]
+    (snap,) = eng.snapshots.values()
+    assert _real(snap[-1]) == [1] * (len(LONG) - 1) + [0]
+    for r in got:
+        cache = lru.fetch_nearest_cache("locals", r.prompt + r.out + [0] * 20)[0]
+        assert _real(cache[-1])[: len(r.prompt) - 1] == [1] * (len(r.prompt) - 1)
+
+
+def test_a_reply_checkpoint_keeps_its_hole_and_the_next_turn_fills_it(tiny, mtp_file):
+    """A "reply" checkpoint's entry is a view of the finished row cut to the checkpoint: it still holds nothing about
+    the token after its end, and the next turn, which goes on from it with other tokens, gets the layer's KV there for
+    its own token (issue #29, item 2)."""
+    from locals.mtp import MTP
+
+    n = 12
+    nxt = LONG[:n] + [90, 91, 92]
+
+    def run(mtp):
+        lru = _lru()
+        eng = _engine(tiny, mtp)
+        (a,) = _serve_reqs(eng, [_with_checkpoint(LONG, 3, n, "reply")], lru)
+        kept = lru.fetch_nearest_cache("locals", LONG[:n])[0]
+        (b,) = _serve(eng, [(nxt, 6)], lru)
+        return lru, kept, a, b
+
+    _, _, a0, b0 = run(None)
+    lru, kept, a1, b1 = run(MTP.load(tiny, mtp_file))
+    assert (a1.out, b1.out) == (a0.out, b0.out)
+    assert _offsets(kept) == [n, n]
+    assert _real(kept[-1])[-1] == 0
+    assert b1.cached_tokens == n
+    row = lru.fetch_nearest_cache("locals", b1.prompt + b1.out + [0] * 20)[0]
+    assert _real(row[-1])[: len(nxt) - 1] == [1] * (len(nxt) - 1)
+    _same_slot(row[-1], _cold_row(tiny, mtp_file, nxt, 6)[-1], n - 1)
