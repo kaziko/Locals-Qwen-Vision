@@ -87,7 +87,7 @@ PYTHONPATH=before <repo>/.venv/bin/python patch_cost.py <model> before_<m>_<n>.n
 <repo>/.venv/bin/python patch_form.py                           # the conv and the matmul alone, random weights
 PYTHONPATH=before <repo>/.venv/bin/python run_locals.py <model> pics tok_before_<m>.json   # the six questions, before
 <repo>/.venv/bin/python run_locals.py <model> pics tok_after_<m>.json                      # and after
-<repo>/.venv/bin/python answers_compare.py tok_before_<m>.json tok_after_<m>.json
+<repo>/.venv/bin/python answers_compare.py tok_before_<m>.json tok_after_<m>.json   # exits 1 if any picture differs
 ```
 
 `patch_cost.py` sends `stage_cost.py`'s request (both take it from `request.py`) and times, inside it,

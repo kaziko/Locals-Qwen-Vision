@@ -634,3 +634,29 @@ def test_the_rope_shift_moves_with_its_row():
     assert kv.offset.tolist() == [-2]
     kv.extend(layer(1, 3))
     assert kv.offset.tolist() == [-2, 3]
+
+
+_CUT_HASHES = [
+    ((200, 150), "qwen", (14, 20), "404e9ba4fd3bf9f868c5aced45acb63ed2d55b36ee3c12459c84b82e34da57fa"),
+    ((200, 150), "gemma", (42, 57), "408b2caedc1b3c32d48d34914625986799ec7429ddacf134273165505a490d0e"),
+    ((97, 61), "qwen", (14, 22), "a66f42210e82af33f8bd3075542d5cae7363416c76e0abf3272c9ae1d13c2fa5"),
+    ((97, 61), "gemma", (39, 63), "b14b2e0ad30344f8c876e190cc454e6c69fb9b4764d8b08c8b21784068454d07"),
+]
+
+
+def test_the_cut_is_bit_identical_to_the_per_family_branches():
+    """Issue #35: the one-formula cut gives the same bytes as the two per-family branches it replaced. The hashes
+    come from the old preprocess (origin/main cfea673), run on these seeded noise pictures with Pillow 13.0.0 and
+    numpy 2.5.3. A new Pillow can change the bicubic resize, and so these hashes, with no change to the cut."""
+    import hashlib
+
+    from PIL import Image
+
+    rng = np.random.default_rng(35)
+    for (w, h), family, grid, want in _CUT_HASHES:
+        if family == "qwen":  # one noise picture per size, drawn once in the old order
+            buf = io.BytesIO()
+            Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8)).save(buf, "PNG")
+        pic = vision.preprocess(buf.getvalue(), family)
+        got = hashlib.sha256(np.ascontiguousarray(pic.patches).tobytes()).hexdigest()
+        assert (pic.grid, got) == (grid, want), (w, h, family)
