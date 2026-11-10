@@ -1661,6 +1661,7 @@ class HybridBatchEngine(BatchEngine):
         an image row takes no MTP drafts, _mtp_ok)."""
         for c in ctx.fa + [ctx.entry]:
             c.offset = c._idx - c.left_padding
+        for c in ctx.fa:  # (the entry's holes are its flag column: it carries no real)
             c.real = None
         for c in ctx.rec:
             c.token_states = c.token_conv = None
@@ -1708,7 +1709,8 @@ class HybridBatchEngine(BatchEngine):
             # the budget masks only where they can bite: the CPU's count is at most one pass (2 tokens) behind n_out, so
             # with the budget inactive at its fewest tokens left (the draft's position: 1 less), every token fits
             near = r.controller.budget_active(r.max_tokens - len(r.out) - 3)
-            lg = self._solo_masked(r, logits, g, [d], left=r.max_tokens - n_out, budget=near)
+            lg = self._solo_masked(r, logits, g, [d], left=r.max_tokens - n_out if near else None,
+                                 budget=near)
         else:
             lg = logits
         if not t_r:

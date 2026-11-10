@@ -568,24 +568,19 @@ def test_a_stop_at_a_kept_draft_ends_where_the_loop_that_reads_every_pass_ends(t
     assert _real(cache_new[-1])[-1] == 0 == _real(cache_old[-1])[-1]
 
 
-class _Planner:
-    """What the engine reads of a forced-span planner when spans are off: the vocabulary (its token lengths)."""
-
-    def __init__(self, vocab):
-        self.vocab = vocab
-
-
 @pytest.fixture(scope="module")
 def budget_grammar():
     """A grammar for the tiny model's 512 tokens, one byte each: letters, then a dot and 8 digits. Its finishing cost
     from the start is 9 tokens, so a reply of 30 runs under the budget mask for its last ones (issue #39)."""
+    from types import SimpleNamespace
+
     from locals.constraint import compile_constraint
     from locals.vocab import ByteTrie, TokenVocab
 
     chars = b"abcdefghij0123456789."
     vocab = TokenVocab([None, None] + [chars[i % len(chars):][:1] for i in range(510)], [EOS], 512)
     c = compile_constraint(r"[a-j]{0,60}\.[0-9]{8}", vocab, ByteTrie.build(vocab))
-    return c, _Planner(vocab)
+    return c, SimpleNamespace(vocab=vocab)  # (the planner, spans off: only its vocabulary is read)
 
 
 def _budget_request(grammar, n, budget=True):
@@ -601,31 +596,41 @@ def test_a_stretch_under_a_grammar_with_a_budget_gives_the_reply_of_the_loop_tha
         tiny, mtp_file, budget_grammar):
     """Issue #39: a pipelined stretch under a grammar, near its token budget (the budget mask decides its last
     tokens), gives the greedy reply of the loop that reads every pass, and of MTP off."""
-    (off,) = _serve_reqs(_engine(tiny), [_budget_request(budget_grammar, 30)])
-    (free,) = _serve_reqs(_engine(tiny), [_budget_request(budget_grammar, 30, budget=False)])
+    def req(budget=True):
+        return _budget_request(budget_grammar, 30, budget)
+
+    (off,) = _serve_reqs(_engine(tiny), [req()])
+    (free,) = _serve_reqs(_engine(tiny), [req(budget=False)])
     assert off.out != free.out  # (the budget mask changes the reply: it is in play)
     tail = bytes(budget_grammar[1].vocab.token_bytes[t][0] for t in off.out if t != EOS)
     assert tail[-9:-8] == b"." and tail[-8:].isdigit(), tail
     for pattern in ("all kept", "mixed"):
         old_mtp = _oracle_at(tiny, mtp_file, off.out, PATTERNS[pattern])
-        (old,) = _serve_reqs(_stretch_engine(tiny, old_mtp, pipelined=False), [_budget_request(budget_grammar, 30)])
+        (old,) = _serve_reqs(_stretch_engine(tiny, old_mtp, pipelined=False), [req()])
         new_mtp = _oracle_at(tiny, mtp_file, off.out, PATTERNS[pattern])
         eng = _stretch_engine(tiny, new_mtp)
-        (new,) = _serve_reqs(eng, [_budget_request(budget_grammar, 30)])
+        (new,) = _serve_reqs(eng, [req()])
         assert new.out == old.out == off.out, pattern
         assert eng.counters.get("stretch_passes", 0) > 0 and eng.counters.get("draft_mtp_accepted", 0) > 0
 
 
-def _logical(c):
-    """Whether a batch attention layer's rope position is its stored slots' count, as outside a stretch."""
-    return (c.offset == c._idx - c.left_padding).tolist() == [True]
+def _batch_layers(cache):
+    """The batch attention layers of a cache list: the main ones and the MTP entry."""
+    from mlx_lm.models.cache import BatchKVCache
+
+    return [c for c in cache if isinstance(c, BatchKVCache)]
+
+
+def _plain(c):
+    """Whether a batch attention layer is as outside a stretch: no hole flags, and its rope position is its stored
+    slots' count. The second value is for the failure message."""
+    ok = getattr(c, "real", None) is None and (c.offset == c._idx - c.left_padding).tolist() == [True]
+    return ok, (c.offset.tolist(), c._idx, c.left_padding.tolist(), getattr(c, "real", None) is None)
 
 
 def test_a_pass_that_raises_mid_stretch_leaves_every_layer_a_plain_cache(tiny, mtp_file, monkeypatch):
     """Issue #39: a pass that fails part-way through a stretch (here its logits) leaves no stretch state on the row's
     attention layers or the MTP entry (no hole flags), and each one's rope position is its stored slots' count."""
-    from mlx_lm.models.cache import BatchKVCache
-
     from locals import hybrid_batch as hb
 
     (off,) = _serve(_engine(tiny), [(LONG, 40)])
@@ -654,11 +659,11 @@ def test_a_pass_that_raises_mid_stretch_leaves_every_layer_a_plain_cache(tiny, m
     with pytest.raises(RuntimeError, match="a pass that fails"):
         _serve(eng, [(LONG, 40)])
     assert raised == [len(seen)] and len(seen) > 1  # (a pass of a running stretch, not its first)
-    layers = [c for c in seen[-1] if isinstance(c, BatchKVCache)]
+    layers = _batch_layers(seen[-1])
     assert layers and layers[-1] is seen[-1][-1]  # (the main attention layers and the MTP entry)
     for c in layers:
-        assert getattr(c, "real", None) is None
-        assert _logical(c), (c.offset, c._idx, c.left_padding)
+        ok, why = _plain(c)
+        assert ok, why
 
 
 @pytest.mark.parametrize("pattern", ["all kept", "mixed"])
@@ -667,16 +672,13 @@ def test_a_stretch_with_holes_and_a_discarded_pass_leaves_each_rope_position_at_
     """Issue #39: the rope position lives on each layer's offset during a stretch; once it ends (here at the length
     limit, which discards the pass launched after it, and over rejected drafts' holes), every attention layer and
     the MTP entry is back at its stored slots' count."""
-    from mlx_lm.models.cache import BatchKVCache
-
     (off,) = _serve(_engine(tiny), [(LONG, 40)])
     eng = _stretch_engine(tiny, _oracle_at(tiny, mtp_file, off.out, PATTERNS[pattern]))
     ends, stretch = [], eng._solo_stretch
 
     def checked(r, cache, *a):
         out = stretch(r, cache, *a)
-        ends.append([(c.offset.tolist(), (c._idx - c.left_padding).tolist(), getattr(c, "real", None) is None)
-                     for c in cache if isinstance(c, BatchKVCache)])
+        ends.append([_plain(c) for c in _batch_layers(cache)])
         return out
 
     monkeypatch.setattr(eng, "_solo_stretch", checked)
@@ -687,7 +689,7 @@ def test_a_stretch_with_holes_and_a_discarded_pass_leaves_each_rope_position_at_
         assert eng.counters["draft_mtp_accepted"] < eng.counters["draft_mtp_tokens"]  # (rejected drafts: holes)
     assert ends and all(len(e) == 2 for e in ends)  # (the tiny model's one attention layer and the entry)
     for e in ends:
-        assert all(o == n and clear for o, n, clear in e), e
+        assert all(ok for ok, _ in e), e
 
 
 def test_a_request_arriving_as_the_stop_is_read_is_still_served(tiny, mtp_file):
