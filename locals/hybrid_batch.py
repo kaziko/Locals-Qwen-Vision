@@ -1732,8 +1732,9 @@ class HybridBatchEngine(BatchEngine):
             rest = mx.where(mx.arange(lp.shape[-1]) == d0, NEG_INF, lp[0])
             c_rest = mx.random.categorical(rest, **kw2).astype(mx.int32)
             c_bonus = mx.random.categorical(lp[1], **kw2).astype(mx.int32)
-            # the draft-less rule's draw, from row 0 as filtered above (a seeded row: its own key, as _pick draws)
-            plain = (self._sample(lg[:1], spec) if isinstance(spec, list) else mx.random.categorical(lp[:1]))[0]
+            # the draft-less rule's draw, as _pick draws it: filtered in the logits' dtype, not from lp (float32), which
+            # rounds differently and changed a sampled reply on a float16 model (issue #47)
+            plain = self._sample(lg[:1], spec)[0]
             kept = valid & keep
             first = mx.where(valid, mx.where(keep, d0, c_rest), plain.astype(mx.int32))
             x_next = mx.where(kept, c_bonus, first)
