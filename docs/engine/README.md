@@ -302,7 +302,9 @@ Measurements: `docs/measurements/mtp/README.md`.
 launched before pass p is read: the next token, the next draft, the recurrent state after the kept tokens, the grammar
 state and the logical position are device values computed from pass p's logits. A rejected draft's slot stays in the
 main KV as a hole (GLOSSARY.md): the attention mask hides it (`real` on the batch layer, `_mask_holes`) and the rope
-path takes the row's logical position instead of the stored count (`rope_offset`, `fuse._rope_offset`); the MTP
+path takes the row's logical position, which the stretch puts on each layer's `offset` before a pass (a
+`BatchKVCache`'s per-row device array; `_idx` counts the stored slots, and the stretch's end sets `offset` back from
+it, also when a pass raises: `_stretch_reset`); the MTP
 entry gets the same slot with its own flag. The CPU reads pass p's picks while pass p+1 runs and commits them one pass
 behind, streaming included. A stop found there (an end of sequence, `finished()`, `max_tokens`) or a forced span
 discards pass p+1, which gives its random-stream key index back; the stretch ends there, when a request arrives, or

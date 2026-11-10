@@ -82,15 +82,15 @@ def drafts_setting() -> int:
 
 class _Flagged:
     """The entry as the layer's attention sees it: the new keys go in with their flag column, and come back
-    without it. ``offset``: the rope position of the first new slot when it is not the entry's own (a solo stretch
-    with holes, docs/adr/0002-pipelined-draft-loop.md: the logical position, a device value)."""
+    without it. The rope position is the entry's ``offset`` (in a solo stretch with holes, the logical position:
+    docs/adr/0002-pipelined-draft-loop.md)."""
 
-    def __init__(self, entry, flags: mx.array, offset=None):
-        self.entry, self.flags, self._offset = entry, flags, offset
+    def __init__(self, entry, flags: mx.array):
+        self.entry, self.flags = entry, flags
 
     @property
     def offset(self):
-        return self.entry.offset if self._offset is None else self._offset
+        return self.entry.offset
 
     def update_and_fetch(self, keys, values):
         f = mx.broadcast_to(self.flags[:, None, :, None].astype(keys.dtype), keys.shape[:3] + (1,))
@@ -173,16 +173,16 @@ class MTP:
         causal = mx.arange(T)[None, :] <= (t0 + mx.arange(L))[:, None]  # (L, T)
         return real[:, None, None, :] & causal[None, None]
 
-    def fill(self, entry, hidden: mx.array, nexts: mx.array, flags: mx.array, offset=None) -> mx.array:
+    def fill(self, entry, hidden: mx.array, nexts: mx.array, flags: mx.array) -> mx.array:
         """Run the layer over the entry's next L positions: ``hidden`` (B, L, D) the main model's hidden states there
         (after its final norm), ``nexts`` (B, L) the token after each, ``flags`` (B, L) where ``nexts`` is known (a
-        False slot is written as a hole). ``offset``: the rope position of the first one, when the entry's own is not
-        it (a solo stretch with holes). Returns the layer's output (B, L, D), before its norm."""
+        False slot is written as a hole). The first one is rotated at the entry's ``offset``. Returns the layer's
+        output (B, L, D), before its norm."""
         lay = self.layer
         e = self.lm.model.embed_tokens(nexts)
         x = lay.fc(mx.concatenate([lay.pre_fc_norm_embedding(e), lay.pre_fc_norm_hidden(hidden.astype(e.dtype))], axis=-1))
         mask = self._mask(entry, flags)
-        return lay.layers[0](x, mask=mask, cache=_Flagged(entry, flags, offset))
+        return lay.layers[0](x, mask=mask, cache=_Flagged(entry, flags))
 
     def logits(self, out: mx.array) -> mx.array:
         """Draft logits of the layer's output: its norm, then the main model's output head."""
