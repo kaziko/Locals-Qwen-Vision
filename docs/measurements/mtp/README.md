@@ -246,3 +246,24 @@ rounds its float16 logits differently from the 1-token step the other loop runs 
 tokens, in process on the committed build, three rounds): MTP off, prompt-lookup drafts 113.9 to 117.3 tok/s (114 of
 253 draft tokens kept); the loop that reads every pass 101.2 to 102.5; the pipelined loop 128.3 to 130.0 (every one of
 its 100 drafts kept, no lookup drafts inside the stretch). The same tokens in all three.
+
+## Issue #39: the budget masks in a constrained stretch
+
+`budget_mask_cost.py`: one greedy JSON reply under a schema (six books, 700 tokens allowed), alone, MTP drafts
+pipelined (1 draft, back-off at its default: off), in process, on `Kaziko/Qwen3.5-4B-Zwyrol` with `mtp_bf16.safetensors`,
+Apple M2 Max, mlx 0.32.3, mlx-lm 0.32.0 (printed by a separate command in the same session, not in the result
+files), `LOCALS_DISK_CACHE=0`. A warm-up run, then 5 timed runs per process; the time
+inside the stretches over their passes. Both sides ran on the issue-39 working tree on top of 64f0fdd, with items 1
+and 3 of the issue applied; "before" without the budget gate (item 2), "after" with it. The schema's largest finishing
+cost is 17 tokens (no state without one), and the reply stops at 496 tokens, so the budget never comes near.
+
+| run | budget masks built | ms a pass (5 runs) | median ms a pass | median tok/s |
+|---|---|---|---|---|
+| before, 1 | 606 (2 a pass, 303 passes) | 12.616 to 12.699 | 12.644 | 107.7 |
+| before, 2 | 606 | 12.638 to 12.759 | 12.730 | 107.3 |
+| after, 1 | 0 | 12.458 to 12.657 | 12.470 | 109.0 |
+| after, 2 | 0 | 12.509 to 12.550 | 12.532 | 108.3 |
+
+The two unchanged runs' medians are 0.086 ms apart (the noise floor). With the gate, a pass is 0.112 to 0.260 ms
+faster by median (about 1 to 2%), above that floor; single runs overlap (12.657 after against 12.616 before). The
+outputs are in `results/budget39/`.

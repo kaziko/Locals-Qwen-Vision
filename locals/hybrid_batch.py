@@ -1388,11 +1388,11 @@ class HybridBatchEngine(BatchEngine):
             out.append(d)
         return out + [draw(lp[k])]
 
-    def _solo_masked(self, r, logits: mx.array, g, draft, left=None) -> mx.array:
+    def _solo_masked(self, r, logits: mx.array, g, draft, left=None, budget: bool = True) -> mx.array:
         """Logits at the sampled position and each draft position under the grammar's state there (as _pick
         masks one-token steps): the state after the fed tokens, then after each draft token. ``draft``: tokens, or
         device (1,) arrays; ``left``: the tokens the request may still write (None: from its committed ones), a device
-        value in the pipelined loop."""
+        value in the pipelined loop; ``budget`` False: no budget mask (the caller knows it would allow every token)."""
         states = [g]
         for tok in draft:
             states.append(self._advance([r], tok if isinstance(tok, mx.array) else mx.array([tok], dtype=mx.int32), states[-1]))
@@ -1401,7 +1401,7 @@ class HybridBatchEngine(BatchEngine):
         m = allowed[G] & (tlen[None, :] >= cover[G][:, None])
         if left is None:
             left = r.max_tokens - len(r.out)
-        bms = [r.controller.budget_mask(G[i] - offs[id(r.controller.c)], left - i) for i in range(len(states))]
+        bms = [r.controller.budget_mask(G[i] - offs[id(r.controller.c)], left - i) for i in range(len(states))] if budget else []
         if any(b is not None for b in bms):
             ones = mx.ones((logits.shape[-1],), dtype=mx.bool_)
             m = m & mx.stack([ones if b is None else b for b in bms])
@@ -1589,9 +1589,11 @@ class HybridBatchEngine(BatchEngine):
     # Pass p+1 is launched before pass p is read: what it feeds (the next token and the next draft), the position, the
     # recurrent state and the grammar state are device values computed from pass p's logits. A rejected draft's slot
     # stays in the main KV as a hole (GLOSSARY.md): masked out of attention (``real`` on the layer, _mask_holes) and
-    # skipped by the logical position the rope takes (``rope_offset``, fuse._rope_offset); the MTP entry gets the same
+    # skipped by the rope, which takes the logical position from each layer's ``offset`` (a BatchKVCache's per-row
+    # device array, set to it before each pass; its stored slots are counted by ``_idx``); the MTP entry gets the same
     # slot, with its own flag. The CPU reads pass p's picks while pass p+1 runs and commits them; a stop or a forced
-    # span found there discards pass p+1, and the stretch ends with a compaction, so all after it sees a dense cache.
+    # span found there discards pass p+1, and the stretch ends with a compaction, so all after it sees a dense cache
+    # (and each layer's offset is its slots' count again, also when a pass raises: _stretch_reset).
 
     class _Stretch(NamedTuple):
         """What every pass of a stretch shares: the row, its attention layers, its recurrent layers, the MTP entry,
@@ -1627,6 +1629,8 @@ class HybridBatchEngine(BatchEngine):
         fa = [c for c in cache[:-1] if isinstance(c, BatchKVCache)]
         rec = [c for c in cache[:-1] if isinstance(c, ArraysCache)]
         base = _write_at(fa[0])
+        if not isinstance(entry, BatchKVCache):
+            raise RuntimeError("the MTP entry of the only row is not a batch layer (its offset carries the rope position)")
         if _write_at(entry) != base or any(_write_at(c) != base for c in fa):
             raise RuntimeError("the cache layers of the only row are not at one offset")
         eos = self._eos_ids(r)
@@ -1637,15 +1641,30 @@ class HybridBatchEngine(BatchEngine):
                              n_out, mx.array(getattr(r, "solo_miss", 0), dtype=mx.int32),
                              mx.array(getattr(r, "solo_resume", 0), dtype=mx.int32), mx.ones((1, base), dtype=mx.bool_))
         holes: List[int] = []  # the slots of rejected drafts, as the CPU reads them
-        cur = self._stretch_launch(ctx, cache, st, base)
-        while True:
-            got = arrive(False)
-            nxt = None if got else self._stretch_launch(ctx, cache, cur["next"], cur["slot"] + 2)
-            end = self._stretch_commit(ctx, cur, dead, holes)
-            if end is None and not got:
-                cur = nxt
-                continue
-            return got, *self._stretch_end(ctx, cur, end, nxt, holes)
+        try:
+            cur = self._stretch_launch(ctx, cache, st, base)
+            while True:
+                got = arrive(False)
+                nxt = None if got else self._stretch_launch(ctx, cache, cur["next"], cur["slot"] + 2)
+                end = self._stretch_commit(ctx, cur, dead, holes)
+                if end is None and not got:
+                    cur = nxt
+                    continue
+                return got, *self._stretch_end(ctx, cur, end, nxt, holes)
+        finally:
+            self._stretch_reset(ctx)
+
+    @staticmethod
+    def _stretch_reset(ctx) -> None:
+        """Every layer of the stretch back to a plain cache, however it ended: no hole flags, no recorded recurrent
+        states, and each attention layer's and the entry's offset its stored slots' count (no M-RoPE shift to keep:
+        an image row takes no MTP drafts, _mtp_ok)."""
+        for c in ctx.fa + [ctx.entry]:
+            c.offset = c._idx - c.left_padding
+        for c in ctx.fa:  # (the entry's holes are its flag column: it carries no real)
+            c.real = None
+        for c in ctx.rec:
+            c.token_states = c.token_conv = None
 
     def _stretch_launch(self, ctx, cache, st, slot: int) -> dict:
         """One pass of ``[x, d]`` from the device state ``st`` (a _PassState), written at ``slot``. Its picks and the
@@ -1671,7 +1690,7 @@ class HybridBatchEngine(BatchEngine):
         spec = self._specs([r], t_r)
         top_p, top_k, key = spec[0][1:] if isinstance(spec, list) else (self.top_p, self.top_k, None)
         for c in fa:
-            c.rope_offset, c.real = pos, real
+            c.offset, c.real = pos, real  # (the rope's logical position; the mask's stored slots: _idx)
         for c in rec:
             c.want_states, c.token_states = True, None
         try:
@@ -1686,7 +1705,14 @@ class HybridBatchEngine(BatchEngine):
         self.counters["stretch_passes"] = self.counters.get("stretch_passes", 0) + 1
         self._growth_trim(1, 64)
         logits = head_logits(self.lm, h)[0]  # x's successor, then the draft's
-        lg = self._solo_masked(r, logits, g, [d], left=r.max_tokens - n_out) if constrained else logits
+        if constrained:
+            # the budget masks only where they can bite: the CPU's count is at most one pass (2 tokens) behind n_out, so
+            # with the budget inactive at its fewest tokens left (the draft's position: 1 less), every token fits
+            near = r.controller.budget_active(r.max_tokens - len(r.out) - 3)
+            lg = self._solo_masked(r, logits, g, [d], left=r.max_tokens - n_out if near else None,
+                                 budget=near)
+        else:
+            lg = logits
         if not t_r:
             preds = mx.argmax(lg, axis=-1).astype(mx.int32)
             keep = preds[0] == d0
@@ -1706,6 +1732,8 @@ class HybridBatchEngine(BatchEngine):
             rest = mx.where(mx.arange(lp.shape[-1]) == d0, NEG_INF, lp[0])
             c_rest = mx.random.categorical(rest, **kw2).astype(mx.int32)
             c_bonus = mx.random.categorical(lp[1], **kw2).astype(mx.int32)
+            # the draft-less rule's draw, as _pick draws it: filtered in the logits' dtype, not from lp (float32), which
+            # rounds differently and changed a sampled reply on a float16 model (issue #47)
             plain = self._sample(lg[:1], spec)[0]
             kept = valid & keep
             first = mx.where(valid, mx.where(keep, d0, c_rest), plain.astype(mx.int32))
@@ -1720,7 +1748,8 @@ class HybridBatchEngine(BatchEngine):
         if constrained:
             g1 = self._advance([r], first.reshape(1), g)
             g2 = mx.where(kept, self._advance([r], x_next.reshape(1), g1), g1)
-        out = self.mtp.fill(entry, h, mx.stack([first, x_next])[None], flags, offset=pos)
+        entry.offset = pos
+        out = self.mtp.fill(entry, h, mx.stack([first, x_next])[None], flags)
         sel = mx.where(kept, out[:, 1:2], out[:, :1])  # (the output at the last real slot drafts next)
         d2 = self.mtp.draft_on_device(sel, r, n_after)
         nxt = self._PassState(x_next.reshape(1), d2, g2, pos2, n_after, miss2, resume2,
@@ -1797,8 +1826,9 @@ class HybridBatchEngine(BatchEngine):
             _, x1, g1, refill = end
             if refill:  # the kept draft's slot, written for the sampled successor: for the span's first token instead
                 entry.trim(1)
+                entry.offset = cur["pos"] + 1
                 r.mtp_out = self.mtp.fill(entry, cur["h"][:, 1:2], mx.array([[x1]], dtype=mx.int32),
-                                          mx.ones((1, 1), dtype=mx.bool_), offset=cur["pos"] + 1)
+                                          mx.ones((1, 1), dtype=mx.bool_))
             else:
                 r.mtp_out = cur["sel"]
         self._stretch_compact(fa + [entry], holes)
@@ -1806,16 +1836,13 @@ class HybridBatchEngine(BatchEngine):
             w = _write_at(entry)
             entry.keys[..., w - 1 - cur["kept"]:w, -1] = 0
         r.mtp_at = _write_at(entry)
-        for c in fa:
-            c.rope_offset = c.real = None
-        for c in rec:
-            c.token_states = c.token_conv = None
         return x1, g1
 
     @staticmethod
     def _stretch_compact(layers, holes: List[int]) -> None:
-        """Move the real slots after the first hole down over the holes, in every attention layer and the entry: the
-        offsets count stored slots again, as everything after the stretch expects."""
+        """Move the real slots after the first hole down over the holes, in every attention layer and the entry (batch
+        layers all): their stored slots are dense again, as everything after the stretch expects (the offsets follow:
+        _stretch_reset)."""
         if not holes:
             return
         n, lo = _write_at(layers[0]), min(holes)  # (the slots before the first hole are in place)
@@ -1828,9 +1855,7 @@ class HybridBatchEngine(BatchEngine):
                 k, v = mx.take(c.keys, idx, axis=2), mx.take(c.values, idx, axis=2)
                 c.keys[..., lo:lo + len(keep), :] = k
                 c.values[..., lo:lo + len(keep), :] = v
-            if isinstance(c, BatchKVCache):
-                c._idx -= drop
-            c.offset = c.offset - drop
+            c._idx -= drop
 
     # -- parked rows -------------------------------------------------------------------
     # A controller may park its row (``parked``: a Qwenputer reply waiting for its computer's run, made in another

@@ -1,0 +1,9 @@
+commit 64f0fdd | dirty files: ['M', 'locals/fuse.py', 'M', 'locals/hybrid_batch.py', 'M', 'locals/mtp.py']
+budget tables: max_cost 17, has_inf False
+{'tokens': 496, 'finish': 'stop', 'passes': 303, 'dev_masks': 0, 'ms_per_pass': 12.579, 'tok_s': 107.957}
+{'tokens': 496, 'finish': 'stop', 'passes': 303, 'dev_masks': 0, 'ms_per_pass': 12.657, 'tok_s': 107.398}
+{'tokens': 496, 'finish': 'stop', 'passes': 303, 'dev_masks': 0, 'ms_per_pass': 12.458, 'tok_s': 109.033}
+{'tokens': 496, 'finish': 'stop', 'passes': 303, 'dev_masks': 0, 'ms_per_pass': 12.47, 'tok_s': 109.08}
+{'tokens': 496, 'finish': 'stop', 'passes': 303, 'dev_masks': 0, 'ms_per_pass': 12.466, 'tok_s': 109.018}
+same tokens in every run: True
+median ms/pass 12.470, median tok/s 109.0

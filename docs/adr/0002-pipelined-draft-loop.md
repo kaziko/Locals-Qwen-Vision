@@ -21,7 +21,7 @@ attention, as the MTP entry already does with its flag column (`_Flagged`), and 
 | the next token `x'` | `where(kept, pick[1], pick[0])`; sampled: the draws `_solo_verify` makes, unread |
 | `_solo_rewind` of the recurrent layers | `token_states[kept]` by a device index (`take`), the conv state the same way |
 | `_solo_rewind` of the attention layers (`trim`) | no trim: the slot's flag is `kept`; attention masks flagged-out slots |
-| the rope offset (`cache.offset`, a Python int in `fuse.py`) | a device counter of real slots; `mx.fast.rope` takes `offset: int | array` (mlx 0.32.3, checked in its signature) |
+| the rope offset (`cache.offset` in `fuse.py`; for the stretch's `BatchKVCache` layers already a per-row device array, `_idx - left_padding`: corrected 2026-11-10, issue #39) | a device counter of real slots, put on `cache.offset` before each pass; `mx.fast.rope` takes `offset: int | array` (mlx 0.32.3, checked in its signature) |
 | the next MTP draft (`MTP.draft`, `.tolist()`) | `fill` on the hidden state at the kept position with `x'`, its argmax fed as the draft, unread |
 | the grammar state after the kept tokens | `_advance` is already a device table lookup; `_solo_masked` already builds the per-position masks on the device |
 
@@ -79,8 +79,9 @@ for one seed today as well, with the same distribution.
   offset, before another row joins, before a prompt-cache entry or a checkpoint is saved, and before the KV is
   read by anything that uses `cache.offset`. A rejected slot's position is also skipped by the positions, so the
   attention is over the same slots at the same positions as today.
-- The fused attention path in `fuse.py` takes the offset from `cache.offset`; it must take the device counter
-  for a one-row cache with holes. Everything else that reads `cache.offset` sees the cache only after compaction.
+- The fused attention path in `fuse.py` takes the offset from `cache.offset`; for a one-row cache with holes that
+  is the device counter, set on each layer before a pass and reset to `_idx - left_padding` when the stretch ends
+  (issue #39). Everything else that reads `cache.offset` sees the cache only after compaction.
 - 1 draft only. With 2 drafts `kept` is 0, 1 or 2, and the next draft's input position has three cases;
   `LOCALS_MTP_DRAFTS=2` keeps today's loop.
 - The hole at a kept cache's end (#29 item 2) is a separate, small change: the last hidden state kept with the
@@ -92,16 +93,24 @@ for one seed today as well, with the same distribution.
 
 - **A cache offset that is a device value**, so a rejected slot is written over. Every cache class, the fused
   kernels and the prompt cache read `cache.offset` as a Python int; that is a rewrite of the cache, not of the
-  loop.
+  loop. *Note 2026-11-10 (issue #39):* the reason is partly wrong: `BatchKVCache`, the stretch's
+  class, already keeps `offset` as a device array (decision 1 below). The option (slot reuse) stays rejected, as the owner
+  decided on issue #39; only its stated reason is corrected here.
 - **Launch pass p+1 for both outcomes** (kept and rejected) and keep one. Two passes for one: the whole gain.
 - **Keep the CPU in the loop, read less** (one flag instead of the picks). Still one sync per pass, so the
   pipelining of the stream is still lost; #18 puts that at 16% with one request. The 0.98x is mostly that.
 
 ## Decisions on the open points (PR #36, 2026-11-10)
 
-1. **Holes in the main KV; `cache.offset` stays a Python int.** The physical offset counts stored slots; a
-   device-side logical position counter, used only in the rope path of a one-row cache during a solo stretch,
-   counts real positions. Compact before anything that expects a dense cache.
+1. **Holes in the main KV; stored slots are counted apart from positions.** The stored slots are counted by
+   `_idx`, which the mask reads; a device-side logical position counter, used only in the rope path of a one-row
+   cache during a solo stretch, counts real positions. Compact before anything that expects a dense cache.
+   *Corrected 2026-11-10 (issue #39):* this item first said that `cache.offset` stays a Python int. For
+   `BatchKVCache`, the only class the stretch touches, mlx-lm keeps `offset` as a per-row device array
+   (`_idx - left_padding`) that only the rope reads. So the logical position is put on `cache.offset` itself
+   before each pass, of every attention layer and the MTP entry, and the stretch's end sets it back from
+   `_idx - left_padding` (also when a pass raises). The rejected option below (slot reuse) is a different idea
+   and stays rejected.
 2. **Compact at the stretch end only.** The CPU catching up is not a boundary: the same stretch goes on. One
    gather at the boundary that needs a dense cache anyway; an adaptive threshold, if long stretches ever make the
    masked length costly, is a separate optimization.
