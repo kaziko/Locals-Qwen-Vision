@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Vision cleanups** (issue #35). `vision.preprocess` cuts both families' patches with one formula, read from one
+  table per family that `vision.measure` reads too; the output is bit-identical to before for Qwen and Gemma.
+  The five vision timing scripts take their request from one `docs/measurements/vision/request.py`, and
+  `answers_compare.py` prints a picture B lacks as `DIFFER (missing in B)` instead of stopping.
 - **Tuning-file seed and cleanup fixes** (issue #32). A load no longer raises when a seed candidate disappears during
   the search (another process set its bad file aside). A file for this MLX version that does not parse is set aside
   as `.bad` and the load seeds as a first start would, instead of timing every shape from scratch. When that rename
