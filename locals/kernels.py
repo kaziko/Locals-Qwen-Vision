@@ -307,7 +307,13 @@ def _seed() -> tuple:
     d = _os.path.dirname(_TUNE_PATH)
     versions = glob.glob(_os.path.join(glob.escape(d), _TUNE_STEM + "_mlx*.json"))
     found = [p for p in [_os.path.join(d, _TUNE_FILE), *versions] if p != _TUNE_PATH and _os.path.isfile(p)]
-    for p in sorted(found, key=_os.path.getmtime, reverse=True):
+    def written(p):  # (a file another process set aside since: last in the order, and its read fails)
+        try:
+            return _os.path.getmtime(p)
+        except OSError:
+            return float("-inf")
+
+    for p in sorted(found, key=written, reverse=True):
         try:
             return p, _read_tune(p)
         except Exception:  # noqa: BLE001
@@ -340,7 +346,7 @@ def _load_tune():
                         _os.replace(_TUNE_PATH, _TUNE_PATH + ".bad")
                     except OSError:
                         pass
-            else:
+            if user is None:  # (none, or one set aside: a first start, or every shape was timed from scratch for good)
                 seed, user = _seed()  # (read only: the seed file stays as it is)
             for k, v in (user or {}).items():  # over the preset; a dict-valued key (__times__) entry by entry
                 tune[k] = {**tune[k], **v} if isinstance(v, dict) and isinstance(tune.get(k), dict) else v
@@ -456,14 +462,30 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _shared_path():
+    """The user's file from before versioned names (``tune_v6_<arch>.json``, next to this version's), or ``None``
+    with ``LOCALS_TUNE_CACHE``."""
+    return None if _TUNE_PATH_FROM_ENV else _os.path.join(_os.path.dirname(_TUNE_PATH), _TUNE_FILE)
+
+
 def _drop_old_temps() -> None:
-    """Temporary files of saves that a killed process left (each the size of the cache, kept for good)."""
+    """Temporary files of saves that a killed process left (each the size of the cache, kept for good), and the lock
+    file of the name from before versioned names, once no process holds it."""
+    import fcntl
     import glob
 
     for t in glob.glob(_os.path.join(glob.escape(_os.path.dirname(_TUNE_PATH)), ".tune-*.json")):
         try:
             if _time.time() - _os.path.getmtime(t) > 600:  # (a save takes a second: an old one is no live save)
                 _os.unlink(t)
+        except OSError:
+            pass
+    shared = _shared_path()
+    if shared and shared != _TUNE_PATH:
+        try:
+            with open(shared + ".lock") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # (an older locals saving now: raises, and it stays)
+                _os.unlink(shared + ".lock")
         except OSError:
             pass
 
@@ -477,7 +499,9 @@ def _crashed_shapes(tune: dict) -> bool:
     import sys
 
     changed = False
-    for m in glob.glob(glob.escape(_TUNE_PATH) + ".tuning-*"):
+    shared = _shared_path()  # (a marker from before versioned names counts as well: it was never read, and stayed)
+    names = [_TUNE_PATH] + ([shared] if shared and shared != _TUNE_PATH else [])
+    for m in [m for n in names for m in glob.glob(glob.escape(n) + ".tuning-*")]:
         try:
             pid = int(m.rsplit("-", 1)[1])
             with open(m) as f:

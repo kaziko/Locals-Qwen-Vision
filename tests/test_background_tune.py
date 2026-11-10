@@ -267,6 +267,68 @@ def test_a_seed_that_does_not_parse_is_passed_over_for_the_next_newest(tmp_path,
     assert cut.read_text() == '{"1024x512x1": ["fr'  # (another version's file: not set aside from here)
 
 
+def test_a_seed_file_that_goes_during_the_search_is_passed_over(tmp_path, monkeypatch):
+    """Another process sets its bad file aside (renames it to .bad) after the search saw it: the load went on, not
+    raised FileNotFoundError."""
+    import json
+    import os
+
+    stem = _version_dir(tmp_path, monkeypatch)
+    good, gone = tmp_path / f"{stem}.json", tmp_path / f"{stem}_mlx0.0.2.json"
+    good.write_text(json.dumps({"__mlx__": "0.0.1", "1024x512x1": ["dense"]}))
+    gone.write_text(json.dumps({"__mlx__": "0.0.2", "1024x512x1": ["mlx"]}))
+    isfile = os.path.isfile
+
+    def isfile_then_renamed(p):
+        seen = isfile(p)
+        if seen and p == str(gone):
+            os.replace(gone, str(gone) + ".bad")  # (the other process, right after this one looked)
+        return seen
+
+    monkeypatch.setattr(os.path, "isfile", isfile_then_renamed)
+    assert kernels._seed()[0] == str(good)
+    monkeypatch.setattr(kernels, "_TUNE", None)
+    assert kernels._load_tune()["1024x512x1"] == ("dense",)
+
+
+def test_a_bad_file_for_this_mlx_is_set_aside_and_the_load_seeds_as_a_first_start(tmp_path, monkeypatch, capsys):
+    """The bad file was renamed and a preset-only file saved in its place: from then on the file was there, so no
+    seed ran, and every shape was timed from scratch."""
+    import json
+
+    stem = _version_dir(tmp_path, monkeypatch)
+    (tmp_path / f"{stem}_mlx0.0.1.json").write_text(json.dumps({"__mlx__": "0.0.1", "1024x512x1": ["dense"]}))
+    mine = tmp_path / f"{stem}_mlx{mx.__version__}.json"
+    mine.write_text('{"1024x512x1": ["fr')  # (a write cut short)
+    tune = kernels._load_tune()
+    assert tune["1024x512x1"] == ("dense",) and tune["__stale__"] == ["1024x512x1"]  # (as a first start: all stale)
+    assert (tmp_path / f"{mine.name}.bad").read_text() == '{"1024x512x1": ["fr'
+    assert json.loads(mine.read_text())["1024x512x1"] == ["dense"]
+    assert "the 1 kernel shapes" in capsys.readouterr().err
+
+
+def test_a_crash_marker_under_the_name_from_before_versioned_files_counts_once(tmp_path, monkeypatch):
+    """A marker a dead process left under the shared name (before the file was per MLX version) was never read, and
+    it stayed in ~/.cache/locals for good, with that name's lock file."""
+    import fcntl
+    import subprocess
+
+    _version_dir(tmp_path, monkeypatch)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    old = tmp_path / kernels._TUNE_FILE
+    (tmp_path / f"{old.name}.tuning-{dead.pid}").write_text("2560x4096x8")
+    lock = tmp_path / f"{old.name}.lock"
+    lock.write_text("")
+    with open(lock) as held:  # (an older locals saving right now: its lock stays)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert kernels._load_tune()["__crashed__"] == {"2560x4096x8": 1}
+        assert not list(tmp_path.glob("*.tuning-*")) and lock.exists()
+    monkeypatch.setattr(kernels, "_TUNE", None)
+    assert kernels._load_tune()["__crashed__"] == {"2560x4096x8": 1}  # (once: the marker went)
+    assert not lock.exists()
+
+
 def test_a_shape_pinned_after_two_crashes_is_never_marked_stale(tmp_path, monkeypatch):
     """A shape that stopped locals twice keeps MLX's kernel (_crashed_shapes). Marked stale, the idle tuner timed it
     again under the MLX that had aborted twice, and nothing took it off the list, so the server aborted at every
