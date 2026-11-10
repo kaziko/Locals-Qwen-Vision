@@ -45,6 +45,13 @@ def _concat_quantized(mods) -> nn.QuantizedLinear:
     return q
 
 
+def _rope_offset(cache):
+    """The position the layer's new tokens are rotated at: the cache's offset, or the logical position a solo stretch
+    with holes keeps on it (``rope_offset``, a device value; hybrid_batch._solo_stretch, docs/adr/0002)."""
+    off = getattr(cache, "rope_offset", None)
+    return cache.offset if off is None else off
+
+
 class FusedAttention(nn.Module):
     def __call__(self, x: mx.array, mask: Optional[mx.array] = None, cache: Optional[Any] = None) -> mx.array:
         B, L, _ = x.shape
@@ -53,8 +60,9 @@ class FusedAttention(nn.Module):
         h, kv = self.n_heads, self.n_kv_heads
         queries, keys, values = qkv[:, :h], qkv[:, h : h + kv], qkv[:, h + kv :]
         if cache is not None:
-            queries = self.rope(queries, offset=cache.offset)
-            keys = self.rope(keys, offset=cache.offset)
+            offset = _rope_offset(cache)
+            queries = self.rope(queries, offset=offset)
+            keys = self.rope(keys, offset=offset)
             keys, values = cache.update_and_fetch(keys, values)
         else:
             queries = self.rope(queries)
@@ -334,8 +342,9 @@ class FusedGatedAttention(nn.Module):
         keys = self.k_norm(keys.reshape(B, L, kv, -1)).transpose(0, 2, 1, 3)
         values = values.reshape(B, L, kv, -1).transpose(0, 2, 1, 3)
         if cache is not None:
-            queries = self.rope(queries, offset=cache.offset)
-            keys = self.rope(keys, offset=cache.offset)
+            offset = _rope_offset(cache)
+            queries = self.rope(queries, offset=offset)
+            keys = self.rope(keys, offset=offset)
             keys, values = cache.update_and_fetch(keys, values)
         else:
             queries = self.rope(queries)

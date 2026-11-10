@@ -17,7 +17,7 @@ import json
 import os
 import time
 from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import mlx.core as mx
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, BatchRotatingKVCache, KVCache, make_prompt_cache
@@ -195,6 +195,43 @@ def _rewind(cache, marks) -> bool:
     return True
 
 
+def _gdn_at(c, ts: mx.array, token_conv, keep, conv_idx=None) -> None:
+    """A fused Gated DeltaNet layer's state after the first ``keep`` tokens of a pass, from what its kernel recorded
+    (``ts``: the recurrent state after every token; ``token_conv``: the conv state before the pass and the pass's
+    inputs). ``keep`` may be a device value (1 or 2, the pipelined solo loop): then two gathers, with ``conv_idx`` the
+    conv window's positions (``arange(n_keep) + keep``, shared by the layers of a pass; 24 layers of ``where`` cost
+    1.7 ms of encoding a pass)."""
+    old, qkv = token_conv
+    n_keep = old.shape[1]
+    if isinstance(keep, mx.array):
+        c.cache[1] = mx.take(ts, keep - 1, axis=0)
+        c.cache[0] = mx.take(mx.concatenate([old, qkv[:, :2]], axis=1), mx.arange(n_keep) + keep if conv_idx is None else conv_idx, axis=1)
+        return
+    c.cache[1] = ts[keep - 1]
+    c.cache[0] = mx.contiguous(mx.concatenate([old, qkv[:, :keep]], axis=1)[:, -n_keep:])
+
+
+@mx.compile
+def _stretch_book(kept, valid, keep, backoff, first, x_next, n_out, miss, resume, pos, bo):
+    """The bookkeeping of a pass of the pipelined solo loop (_stretch_launch), as one compiled function (one kernel or
+    two where some thirty small ones each cost their encoding): the committed count, the back-off (as _solo keeps it
+    with ``bo``, mtp_backoff: a rejected or cut draft waits 1, 2, 4, ... 32 tokens; without it a cut draft still waits
+    one pass, as the loop that reads every pass does, which leaves _solo for a cut and comes back a step later), the
+    logical position, the entry's flags and the readback."""
+    k_i = kept.astype(mx.int32)
+    n_after = n_out + 1 + k_i
+    rej = valid & ~keep
+    cut = ~valid & ~backoff
+    miss2 = mx.where(kept, mx.array(0, dtype=mx.int32), mx.where(cut | rej, miss + 1, miss))
+    wait = mx.minimum(32, mx.left_shift(1, mx.maximum(miss2 - 1, 0)))
+    resume2 = mx.where(rej & bo, n_after + wait, mx.where(cut, n_out + mx.where(bo, wait, 1), resume))
+    # the entry: x's slot real where the loop that reads every pass fills it (a draft pass, or the plain step the
+    # back-off ends with: _mtp_last), the draft's where it is kept
+    flags = mx.stack([valid | (n_after > resume2), kept])[None]
+    rb = mx.stack([first, k_i, x_next, valid.astype(mx.int32), backoff.astype(mx.int32), n_after, miss2, resume2])
+    return k_i, n_after, miss2, resume2, pos + 1 + k_i, flags, rb
+
+
 def _wrap_one(kv):
     """A single-stream KV cache as a batch-of-one cache layer, sharing its buffers."""
     b = BatchKVCache([0])
@@ -276,6 +313,31 @@ def _grow_one_layer_at_a_time(cls) -> None:
 
 _grow_one_layer_at_a_time(BatchKVCache)
 _grow_one_layer_at_a_time(KVCache)
+
+
+def _mask_holes(cls) -> None:
+    """A batch layer's mask also hides its holes (GLOSSARY.md): with ``real`` set on the layer, a (B, written) device
+    flag per stored slot (a solo stretch with pipelined drafts, _solo_stretch), the mask is false wherever it is. The new
+    positions of the pass are real while it runs."""
+    if getattr(cls, "_locals_holes_patch", False):
+        return
+    orig = cls.make_mask
+
+    def make_mask(self, N, *args, **kwargs):
+        m = orig(self, N, *args, **kwargs)
+        real = getattr(self, "real", None)
+        if real is None:
+            return m
+        T = m.shape[-1]
+        if T > real.shape[1]:
+            real = mx.concatenate([real, mx.ones((real.shape[0], T - real.shape[1]), dtype=mx.bool_)], axis=1)
+        return m & real[:, None, None, :]
+
+    cls.make_mask = make_mask
+    cls._locals_holes_patch = True
+
+
+_mask_holes(BatchKVCache)
 
 
 def _eval_layer(c) -> None:
@@ -614,6 +676,15 @@ class HybridBatchEngine(BatchEngine):
         self.mtp = mtp
         self._n_main = len(make_prompt_cache(model))
         self._stash = None  # (MTP entry, position, hidden state): the last one-row step's, for the MTP layer (_launch1)
+        # with 1 MTP draft, the pipelined solo loop (_solo_stretch, docs/adr/0002-pipelined-draft-loop.md); False: the
+        # loop that reads every pass before the next (the reference of the seeded regression test, tests/test_mtp.py)
+        self.mtp_pipelined = True
+        # the back-off after rejected MTP drafts (solo_miss, solo_resume: 1, 2, 4, ... 32 tokens without one). It pays
+        # in the loop that reads every pass, where a draft pass costs the pipelining; in the pipelined loop a pass
+        # without a draft costs the same as one with it (issue #37: 1.14x of MTP off with it, 1.28x without). None: each
+        # loop's own setting (on in the loop that reads every pass, off in the pipelined one); True or False: both
+        # loops, which makes the other loop the reference of the seeded regression test for either setting.
+        self.mtp_backoff = None
         import threading
 
         self._woken = threading.Event()
@@ -1209,11 +1280,22 @@ class HybridBatchEngine(BatchEngine):
         # one token under a grammar is too often a repeated key's start
         return self._draft_checked(r, stream[j:j + width], constrained, least=2)
 
+    def _eos_ids(self, r) -> set:
+        return set(r.controller.eos_ids) or set(self.tokenizer.eos_token_ids)
+
+    def _count_draft(self, r, src: str, fed: int, kept: int) -> None:
+        """A draft's bookkeeping: the row's accepted lengths and the counters, per draft source."""
+        if getattr(r, "solo_acc", None) is None:
+            r.solo_acc = []
+        r.solo_acc.append(kept)
+        for k, v in (("drafted", kept), (f"draft_{src}_tokens", fed), (f"draft_{src}_accepted", kept)):
+            self.counters[k] = self.counters.get(k, 0) + v
+
     def _draft_checked(self, r, draft: List[int], constrained: bool, least: int = 1) -> List[int]:
         """A draft cut at its first end-of-sequence token; under a grammar, to the part the grammar allows (an agent's
         tool call: its arguments), none if that is shorter than ``least``; and to the tokens the request may still
         write."""
-        eos = set(r.controller.eos_ids) or set(self.tokenizer.eos_token_ids)
+        eos = self._eos_ids(r)
         for i, tok in enumerate(draft):
             if tok in eos:
                 draft = draft[:i]
@@ -1268,16 +1350,19 @@ class HybridBatchEngine(BatchEngine):
             out.append(d)
         return out + [draw(lp[k])]
 
-    def _solo_masked(self, r, logits: mx.array, g, draft: List[int]) -> mx.array:
+    def _solo_masked(self, r, logits: mx.array, g, draft, left=None) -> mx.array:
         """Logits at the sampled position and each draft position under the grammar's state there (as _pick
-        masks one-token steps): the state after the fed tokens, then after each draft token."""
+        masks one-token steps): the state after the fed tokens, then after each draft token. ``draft``: tokens, or
+        device (1,) arrays; ``left``: the tokens the request may still write (None: from its committed ones), a device
+        value in the pipelined loop."""
         states = [g]
         for tok in draft:
-            states.append(self._advance([r], mx.array([tok], dtype=mx.int32), states[-1]))
+            states.append(self._advance([r], tok if isinstance(tok, mx.array) else mx.array([tok], dtype=mx.int32), states[-1]))
         G = mx.concatenate(states)
         allowed, cover, tlen, offs = self._tab
         m = allowed[G] & (tlen[None, :] >= cover[G][:, None])
-        left = r.max_tokens - len(r.out)
+        if left is None:
+            left = r.max_tokens - len(r.out)
         bms = [r.controller.budget_mask(G[i] - offs[id(r.controller.c)], left - i) for i in range(len(states))]
         if any(b is not None for b in bms):
             ones = mx.ones((logits.shape[-1],), dtype=mx.bool_)
@@ -1292,11 +1377,7 @@ class HybridBatchEngine(BatchEngine):
                 ts = getattr(c, "token_states", None)
                 if ts is None:
                     raise RuntimeError("a recurrent layer recorded no per-token states to rewind to")
-                keep = ts.shape[0] - drop
-                old, qkv = c.token_conv
-                n_keep = old.shape[1]
-                c.cache[1] = ts[keep - 1]
-                c.cache[0] = mx.contiguous(mx.concatenate([old, qkv[:, :keep]], axis=1)[:, -n_keep:])
+                _gdn_at(c, ts, c.token_conv, ts.shape[0] - drop)
             else:
                 c.trim(drop)
 
@@ -1307,9 +1388,19 @@ class HybridBatchEngine(BatchEngine):
         return (self._entry(cache) is not None and r.image is None and getattr(r.controller, "drafts", True)
                 and not (hasattr(r.controller, "step_config") and not constrained) and self._solo_drafts_ok(cache))
 
+    def _mtp_backoff_on(self) -> bool:
+        """Whether rejected MTP drafts are followed by a back-off (``mtp_backoff``; None: not in the pipelined loop)."""
+        if self.mtp_backoff is not None:
+            return self.mtp_backoff
+        return not (self.mtp is not None and self.mtp.drafts == 1 and self.mtp_pipelined)
+
+    def _mtp_resumed(self, r) -> bool:
+        """Whether the row is past the back-off after rejected drafts (or there is none)."""
+        return not self._mtp_backoff_on() or len(r.out) >= getattr(r, "solo_resume", 0)
+
     def _mtp_wants(self, r, cache) -> bool:
         """Whether the only running row would draft with the MTP layer now (not in the back-off after rejections)."""
-        return self._mtp_ok(r, cache) and len(r.out) >= getattr(r, "solo_resume", 0)
+        return self._mtp_ok(r, cache) and self._mtp_resumed(r)
 
     def _mtp_last(self, r, entry, x: int) -> None:
         """The layer's output at the entry's last position, with ``x`` (fed next) as the token after it, from the
@@ -1330,6 +1421,12 @@ class HybridBatchEngine(BatchEngine):
         prompt-lookup draft gets (_draft_checked), but one token under a grammar is enough (issue #18: the rule of 2
         stays for prompt lookup only)."""
         return self._draft_checked(r, self.mtp.draft(entry, r.mtp_out, r, self.mtp.drafts), constrained)
+
+    def _solo_counted(self) -> None:
+        """One pass of a row alone, counted as a step of one row."""
+        self.counters["steps"] += 1
+        self.counters["rows"] += 1
+        self.counters["solo_steps"] = self.counters.get("solo_steps", 0) + 1
 
     def _solo(self, r, cache, x: int, g, temp: float, arrive, dead: set):
         """Steps for the only running row while it has a forced span or a draft to feed. Returns (requests that
@@ -1353,8 +1450,13 @@ class HybridBatchEngine(BatchEngine):
             prime = False  # a pass of x alone: the MTP layer has nothing at the last position to draft from yet
             if use:
                 self._mtp_last(r, entry, x)
-                if not span and not draft and len(r.out) >= getattr(r, "solo_resume", 0):
+                if not span and not draft and self._mtp_resumed(r):
                     if getattr(r, "mtp_at", None) == _write_at(entry):
+                        if self.mtp.drafts == 1 and self.mtp_pipelined:
+                            got, x, g = self._solo_stretch(r, cache, x, g, temp, arrive, dead)
+                            if got or x is None:
+                                return got, x, g
+                            continue  # a forced span: fed in one pass, as above
                         draft = self._mtp_draft(r, entry, constrained)
                         src = "mtp" if draft else None
                         if not draft:  # cut to nothing (an end of sequence, the grammar): a miss, as one rejected
@@ -1376,9 +1478,7 @@ class HybridBatchEngine(BatchEngine):
                 for c in cache:
                     if isinstance(c, ArraysCache):
                         c.want_states = False
-            self.counters["steps"] += 1
-            self.counters["rows"] += 1
-            self.counters["solo_steps"] = self.counters.get("solo_steps", 0) + 1
+            self._solo_counted()
             self._growth_trim(1, 64)  # (a pass feeds up to 33 tokens)
             logits = head_logits(self.lm, h[:, len(span):, :])[0]  # the last certain token, then each draft token
             gs = g
@@ -1413,10 +1513,7 @@ class HybridBatchEngine(BatchEngine):
                     if isinstance(c, ArraysCache):
                         c.token_states = c.token_conv = None
                 r.fed.extend(draft[:kept])
-                r.solo_acc = (getattr(r, "solo_acc", None) or []) + [kept]
-                self.counters["drafted"] = self.counters.get("drafted", 0) + kept
-                for k, v in ((f"draft_{src}_tokens", len(draft)), (f"draft_{src}_accepted", kept)):  # per draft source
-                    self.counters[k] = self.counters.get(k, 0) + v
+                self._count_draft(r, src, len(draft), kept)
                 # a draft step costs the pipelining of that step: after a draft rejected outright, none for 1 token,
                 # doubling up to 32 while they keep failing (a JSON list's repeated keys: 0.83x without this)
                 r.solo_miss = getattr(r, "solo_miss", 0) + 1 if kept == 0 else 0
@@ -1450,6 +1547,254 @@ class HybridBatchEngine(BatchEngine):
             x = nxt
             r.fed.append(x)
             g = self._advance([r], mx.array([x], dtype=mx.int32), g_after) if constrained else g
+
+    # -- one request alone, one MTP draft, pipelined (docs/adr/0002-pipelined-draft-loop.md) ---------------------
+    #
+    # Pass p+1 is launched before pass p is read: what it feeds (the next token and the next draft), the position, the
+    # recurrent state and the grammar state are device values computed from pass p's logits. A rejected draft's slot
+    # stays in the main KV as a hole (GLOSSARY.md): masked out of attention (``real`` on the layer, _mask_holes) and
+    # skipped by the logical position the rope takes (``rope_offset``, fuse._rope_offset); the MTP entry gets the same
+    # slot, with its own flag. The CPU reads pass p's picks while pass p+1 runs and commits them; a stop or a forced
+    # span found there discards pass p+1, and the stretch ends with a compaction, so all after it sees a dense cache.
+
+    class _Stretch(NamedTuple):
+        """What every pass of a stretch shares: the row, its attention layers, its recurrent layers, the MTP entry,
+        and its sampling (a grammar or not, the temperature, the end-of-sequence tokens)."""
+        r: Request
+        fa: list
+        rec: list
+        entry: object
+        constrained: bool
+        t_r: float
+        eos: Optional[mx.array]
+
+    class _PassState(NamedTuple):
+        """The device state a pass is launched from: x the token to feed, d the draft after it, g the grammar state
+        after x, pos its logical position, n_out the committed tokens, miss and resume the back-off, real the flags
+        of the stored slots."""
+        x: mx.array
+        d: mx.array
+        g: object
+        pos: mx.array
+        n_out: mx.array
+        miss: mx.array
+        resume: mx.array
+        real: mx.array
+
+    def _solo_stretch(self, r, cache, x, g, temp, arrive, dead):
+        """Passes for the only running row while its MTP drafts run pipelined. Returns as _solo does: (requests that
+        arrived meanwhile, the next token to feed, its constraint state); x None: the row is done; with ``r.pend`` set
+        or a token the grammar forced: a forced span, for _solo to feed in one pass."""
+        t_r = temp if getattr(r, "temp", None) is None else r.temp
+        constrained = isinstance(r.controller, LocalsController)
+        entry = cache[-1]
+        fa = [c for c in cache[:-1] if isinstance(c, BatchKVCache)]
+        rec = [c for c in cache[:-1] if isinstance(c, ArraysCache)]
+        base = _write_at(fa[0])
+        if _write_at(entry) != base or any(_write_at(c) != base for c in fa):
+            raise RuntimeError("the cache layers of the only row are not at one offset")
+        eos = self._eos_ids(r)
+        ctx = self._Stretch(r, fa, rec, entry, constrained, t_r, mx.array(sorted(eos), dtype=mx.int32) if eos else None)
+        n_out = mx.array(len(r.out), dtype=mx.int32)
+        st = self._PassState(mx.array([x], dtype=mx.int32), self.mtp.draft_on_device(r.mtp_out, r, n_out), g,
+                             fa[0].offset,  # (the row's logical position: its offset less its left padding)
+                             n_out, mx.array(getattr(r, "solo_miss", 0), dtype=mx.int32),
+                             mx.array(getattr(r, "solo_resume", 0), dtype=mx.int32), mx.ones((1, base), dtype=mx.bool_))
+        holes: List[int] = []  # the slots of rejected drafts, as the CPU reads them
+        cur = self._stretch_launch(ctx, cache, st, base)
+        while True:
+            got = arrive(False)
+            nxt = None if got else self._stretch_launch(ctx, cache, cur["next"], cur["slot"] + 2)
+            end = self._stretch_commit(ctx, cur, dead, holes)
+            if end is None and not got:
+                cur = nxt
+                continue
+            return got, *self._stretch_end(ctx, cur, end, nxt, holes)
+
+    def _stretch_launch(self, ctx, cache, st, slot: int) -> dict:
+        """One pass of ``[x, d]`` from the device state ``st`` (a _PassState), written at ``slot``. Its picks and the
+        next pass's state are device values; one array (``rb``) carries what the CPU reads later."""
+        r, fa, rec, entry, constrained, t_r, eos = ctx
+        xd, d, g, pos, n_out, miss, resume, real = st
+        d0 = d[0]
+        # the back-off after rejections, as the loop that reads every pass has it: that loop leaves _solo for plain
+        # steps until the row's committed tokens reach solo_resume, and the main loop, which reads a step while the
+        # next runs, commits one token more before the boundary that brings it back
+        backoff = n_out <= resume  # (without mtp_backoff, resume moves only at a cut draft: _stretch_book)
+        # the draft is fed only if it is one _draft_checked would keep: not an end of sequence, allowed by the grammar
+        # after x, inside the budget, and not in the back-off (else the draft-less rule samples x's successor and the
+        # draft's slot is a hole)
+        valid = ~backoff & (n_out <= r.max_tokens - 2)
+        if eos is not None:
+            valid = valid & ~mx.any(d0 == eos)
+        if constrained:
+            allowed, cover, tlen, offs = self._tab
+            valid = valid & allowed[g[0], d0] & (tlen[d0] >= cover[g[0]])
+        # the row's own sampling, as _specs gives it; a seed's key index is the pass's, assigned at launch (a
+        # discarded pass gives it back: _stretch_end)
+        spec = self._specs([r], t_r)
+        top_p, top_k, key = spec[0][1:] if isinstance(spec, list) else (self.top_p, self.top_k, None)
+        for c in fa:
+            c.rope_offset, c.real = pos, real
+        for c in rec:
+            c.want_states, c.token_states = True, None
+        try:
+            h = self.lm.model(mx.concatenate([xd, d])[None], cache)
+        finally:
+            for c in rec:
+                c.want_states = False
+        ts = [(c.token_states, c.token_conv) for c in rec]
+        for c in rec:
+            c.token_states = c.token_conv = None
+        self._solo_counted()
+        self.counters["stretch_passes"] = self.counters.get("stretch_passes", 0) + 1
+        self._growth_trim(1, 64)
+        logits = head_logits(self.lm, h)[0]  # x's successor, then the draft's
+        lg = self._solo_masked(r, logits, g, [d], left=r.max_tokens - n_out) if constrained else logits
+        if not t_r:
+            preds = mx.argmax(lg, axis=-1).astype(mx.int32)
+            keep = preds[0] == d0
+            kept = valid & keep
+            first = preds[0]
+            x_next = mx.where(kept, preds[1], preds[0])
+        else:  # _solo_verify's draws, and _pick's for the draft-less rule, all made; valid and keep select
+            from .engine import _filtered
+
+            lp = _filtered(lg.astype(mx.float32), top_p, top_k) * (1.0 / t_r)
+            p = mx.softmax(lp, axis=-1)
+            kw1 = kw2 = {}
+            if key is not None:
+                k1, k2 = mx.random.split(key)
+                kw1, kw2 = {"key": k1}, {"key": k2}
+            keep = (mx.random.uniform(shape=(1,), **kw1) < p[0, d0])[0]
+            rest = mx.where(mx.arange(lp.shape[-1]) == d0, NEG_INF, lp[0])
+            c_rest = mx.random.categorical(rest, **kw2).astype(mx.int32)
+            c_bonus = mx.random.categorical(lp[1], **kw2).astype(mx.int32)
+            plain = self._sample(lg[:1], spec)[0]
+            kept = valid & keep
+            first = mx.where(valid, mx.where(keep, d0, c_rest), plain.astype(mx.int32))
+            x_next = mx.where(kept, c_bonus, first)
+        k_i, n_after, miss2, resume2, pos2, flags, rb = _stretch_book(kept, valid, keep, backoff, first, x_next, n_out, miss,
+                                                                      resume, pos, mx.array(self._mtp_backoff_on()))
+        if rec:  # the recurrent state after the kept tokens (the rewind, on the device)
+            conv_idx = mx.arange(rec[0].cache[0].shape[1]) + 1 + k_i
+            for c, (t, conv) in zip(rec, ts):
+                _gdn_at(c, t, conv, 1 + k_i, conv_idx)
+        g2 = g
+        if constrained:
+            g1 = self._advance([r], first.reshape(1), g)
+            g2 = mx.where(kept, self._advance([r], x_next.reshape(1), g1), g1)
+        out = self.mtp.fill(entry, h, mx.stack([first, x_next])[None], flags, offset=pos)
+        sel = mx.where(kept, out[:, 1:2], out[:, :1])  # (the output at the last real slot drafts next)
+        d2 = self.mtp.draft_on_device(sel, r, n_after)
+        nxt = self._PassState(x_next.reshape(1), d2, g2, pos2, n_after, miss2, resume2,
+                              mx.concatenate([real, mx.array([[True]]), kept.reshape(1, 1)], axis=1))
+        mx.async_eval(rb, d2, g2, nxt.pos, nxt.real, sel, entry.keys, entry.values,
+                      [a for c in rec for a in c.cache], [a for c in fa for a in (c.keys, c.values)])
+        return {"next": nxt, "rb": rb, "h": h, "ts": ts, "keyed": key is not None, "slot": slot, "sel": sel, "pos": pos, "g": g}
+
+    def _stretch_commit(self, ctx, cur, dead, holes: List[int]):
+        """Read pass ``cur`` and commit its picks (one pass behind the GPU). None: the stretch goes on; else how it
+        ends: ("done",), or ("span", x, g, refill): the next token and its state, with ``r.pend`` holding the rest of
+        a forced span (``refill``: the span follows the kept draft, whose entry slot was written for another token)."""
+        r, constrained = ctx.r, ctx.constrained
+        first, kept, x_next, valid, backoff, n_after, miss, resume = cur["rb"].tolist()
+        r.solo_miss, r.solo_resume = miss, resume
+        n0 = len(r.out)
+        picked = [first, x_next] if kept else [first]
+        kept_final, nxt = kept, None
+        for j, tok in enumerate(picked):
+            r.passes += 1
+            if self._commit_drip(r, tok):
+                r.text = self.tokenizer.decode(r.out)
+                dead.add(id(r))
+                kept_final = min(kept, j)  # the draft token stays out of the cache after a stop at it
+                break
+            if j < kept and r.pend:  # the grammar forces a span after the draft token: its successor goes
+                nxt = r.pend.pop(0)
+                break
+        if valid:
+            self._count_draft(r, "mtp", 1, kept_final)
+        elif not backoff:  # a draft cut to nothing (an end of sequence, the grammar, the budget): a miss, not fed
+            self.counters["draft_mtp_cut"] = self.counters.get("draft_mtp_cut", 0) + 1
+        if kept_final:
+            r.fed.append(first)
+        else:
+            holes.append(cur["slot"] + 1)
+        self.tokens_out += len(r.out) - n0
+        self._after_commit(r, n0, dead)
+        cur["kept"], cur["x_next"] = kept_final, x_next
+        if id(r) in dead:
+            return ("done",)
+        after_draft = nxt is not None
+        if nxt is None:
+            nxt = x_next
+        r.fed.append(nxt)
+        if not after_draft and not r.pend:
+            return None
+        g = cur["g"]
+        if constrained:
+            if kept_final:
+                g = self._advance([r], mx.array([first], dtype=mx.int32), g)
+            g = self._advance([r], mx.array([nxt], dtype=mx.int32), g)
+        return ("span", nxt, g, after_draft)
+
+    def _stretch_end(self, ctx, cur, end, nxt, holes: List[int]):
+        """The stretch's end after pass ``cur`` was read: the pass ``nxt`` launched meanwhile (if any) is discarded, the
+        recurrent state goes back to after ``cur``'s kept tokens, the entry's last slots are put right, and the holes
+        are compacted away. Returns (the next token or None, its constraint state)."""
+        r, fa, rec, entry = ctx.r, ctx.fa, ctx.rec, ctx.entry
+        if nxt is not None:  # launched on a token that should not have been fed: nothing of it is kept
+            for c in fa:
+                c.trim(2)
+            entry.trim(2)
+            if nxt["keyed"]:
+                r.draws -= 1  # (its key index goes to the pass that replaces it)
+            self.counters["stretch_discarded"] = self.counters.get("stretch_discarded", 0) + 1
+        for c, (t, conv) in zip(rec, cur["ts"]):
+            _gdn_at(c, t, conv, 1 + cur["kept"])
+        x1, g1 = None, None
+        if end is None:  # a request arrived: the row goes on from this pass's next token
+            x1, g1 = cur["x_next"], cur["next"].g
+            r.mtp_out = cur["sel"]
+        elif end[0] == "span":
+            _, x1, g1, refill = end
+            if refill:  # the kept draft's slot, written for the sampled successor: for the span's first token instead
+                entry.trim(1)
+                r.mtp_out = self.mtp.fill(entry, cur["h"][:, 1:2], mx.array([[x1]], dtype=mx.int32),
+                                          mx.ones((1, 1), dtype=mx.bool_), offset=cur["pos"] + 1)
+            else:
+                r.mtp_out = cur["sel"]
+        self._stretch_compact(fa + [entry], holes)
+        if end is not None and end[0] == "done":  # (as _solo: nothing drafts from a finished row's last positions)
+            w = _write_at(entry)
+            entry.keys[..., w - 1 - cur["kept"]:w, -1] = 0
+        r.mtp_at = _write_at(entry)
+        for c in fa:
+            c.rope_offset = c.real = None
+        for c in rec:
+            c.token_states = c.token_conv = None
+        return x1, g1
+
+    @staticmethod
+    def _stretch_compact(layers, holes: List[int]) -> None:
+        """Move the real slots after the first hole down over the holes, in every attention layer and the entry: the
+        offsets count stored slots again, as everything after the stretch expects."""
+        if not holes:
+            return
+        n, lo = _write_at(layers[0]), min(holes)  # (the slots before the first hole are in place)
+        gone = set(holes)
+        keep = [i for i in range(lo, n) if i not in gone]
+        drop = n - lo - len(keep)
+        idx = mx.array(keep, dtype=mx.int32)
+        for c in layers:
+            if keep:  # (none when the stretch's last slot is its first hole)
+                k, v = mx.take(c.keys, idx, axis=2), mx.take(c.values, idx, axis=2)
+                c.keys[..., lo:lo + len(keep), :] = k
+                c.values[..., lo:lo + len(keep), :] = v
+            if isinstance(c, BatchKVCache):
+                c._idx -= drop
+            c.offset = c.offset - drop
 
     # -- parked rows -------------------------------------------------------------------
     # A controller may park its row (``parked``: a Qwenputer reply waiting for its computer's run, made in another
@@ -2321,10 +2666,10 @@ class HybridBatchEngine(BatchEngine):
                     g = mx.array([self._gstate(r) for r in rows], dtype=mx.int32)
                 if len(rows) == 1 and not queue and not filling and self._solo_ok(rows[0], cache) and self._solo_unpadded(cache):
                     got, x1, g1 = self._solo(rows[0], cache, xs[0], g, temp, arrive, dead)
+                    queue += got  # (a stretch can end with arrivals and the row's stop read in the same pass)
                     if x1 is None:  # done: it is retired at the next boundary
                         cur = None
                         continue
-                    queue += got
                     xs, g = [x1], g1
                 free = not any(isinstance(r.controller, LocalsController) or type(r.controller).__name__ == "WalkController" for r in rows)
                 # A row's next committed sample follows exactly the tokens it has

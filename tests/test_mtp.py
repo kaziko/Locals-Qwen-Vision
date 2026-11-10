@@ -67,10 +67,10 @@ def _engine(tiny, mtp=None):
     return HybridBatchEngine(tiny, Tok(), n_slots=4, share_prefix=False, mtp=mtp)
 
 
-def _serve(eng, reqs, lru=None):
+def _serve(eng, reqs, lru=None, **kw):
     from locals.packed import Request
 
-    reqs = [Request(list(p), _free(), n) for p, n in reqs]
+    reqs = [Request(list(p), _free(), n, **kw) for p, n in reqs]
     waiting = list(reqs)
 
     def source(block):
@@ -150,8 +150,15 @@ def _oracle(tiny, mtp_file, truth, wrong, drafts):
             m = len(r.out)
             return [(truth[m + i] + 1) % 500 + 2 if wrong(k, i) else truth[m + i] for i in range(n) if m + i < len(truth)]
 
+    return _as_oracle(Oracle, tiny, mtp_file, drafts)
+
+
+def _as_oracle(cls, tiny, mtp_file, drafts):
+    """The MTP layer of ``mtp_file``, loaded as usual, wrapped as the oracle class ``cls``."""
+    from locals.mtp import MTP
+
     base = MTP.load(tiny, mtp_file, drafts=drafts)
-    o = Oracle(tiny, base.layer, drafts)
+    o = cls(tiny, base.layer, drafts)
     o.dtype = base.dtype
     return o
 
@@ -167,10 +174,13 @@ LONG = [5, 9, 3, 8, 2, 7, 4, 6, 33, 41, 57, 12, 99, 70, 18, 64, 23, 81, 45, 30]
     (2, lambda k, i: k % 3 == 2),     # both rejected every third pass
 ])
 def test_mtp_drafts_keep_the_reply_and_the_entry_at_the_main_offset(tiny, mtp_file, drafts, wrong):
+    """The loop that reads every pass before the next (2 drafts, and the reference loop for 1; the pipelined one:
+    test_the_pipelined_loop_gives_the_greedy_reply_of_mtp_off_and_a_dense_cache)."""
     (off,) = _serve(_engine(tiny), [(LONG, 40)])
     mtp = _oracle(tiny, mtp_file, off.out, wrong, drafts)
     lru = _lru()
     eng = _engine(tiny, mtp)
+    eng.mtp_pipelined = False
     (on,) = _serve(eng, [(LONG, 40)], lru)
     assert on.out == off.out
     assert mtp.seen and all(a == b for a, b in mtp.seen), mtp.seen
@@ -192,14 +202,15 @@ def test_batched_rows_and_a_restored_prefix_keep_the_entry_at_the_main_offset(ti
         lru = _lru()
         eng = _engine(tiny, mtp)
         a, b = _serve(eng, [(LONG, 24), (other, 30)], lru)
+        batched = dict(eng.counters)
         (c,) = _serve(eng, [(LONG + a.out + [77, 78], 20)], lru)
-        return lru, eng, (a, b, c)
+        return lru, batched, (a, b, c)
 
     _, _, ref = run(None)
-    lru, eng, got = run(MTP.load(tiny, mtp_file))
+    lru, batched, got = run(MTP.load(tiny, mtp_file))
     assert [r.out for r in got] == [r.out for r in ref]
     assert got[2].cached_tokens > len(LONG)  # (it did start from the first one's cache)
-    assert eng.counters["steps"] > eng.counters.get("solo_steps", 0)  # (batched steps ran)
+    assert batched["steps"] > batched.get("solo_steps", 0)  # (batched steps ran)
     for r in got[1:]:  # (the first one's entry went: the third one's extends it, chain_cache)
         cache = lru.fetch_nearest_cache("locals", r.prompt + r.out + [0] * 20)[0]
         assert cache is not None
@@ -356,7 +367,231 @@ def test_a_draft_cut_to_nothing_backs_off(tiny, mtp_file):
     mtp = _oracle(tiny, mtp_file, off.out, lambda k, i: False, 1)
     type(mtp).draft = lambda self, entry, out, r, n, _d=type(mtp).draft: [EOS] * len(_d(self, entry, out, r, n))
     eng = _engine(tiny, mtp)
+    eng.mtp_pipelined = False  # (the loop that reads every pass; the pipelined one is below)
     eng._solo_draft = lambda r, cache: []  # (no prompt-lookup drafts: the tiny model's reply repeats itself)
     (on,) = _serve(eng, [(LONG, 40)])
     assert on.out == off.out
     assert 0 < len(mtp.seen) <= 12, len(mtp.seen)  # (1, 2, 4, 8, ... tokens between tries: not one try a token)
+    mtp = _oracle_at(tiny, mtp_file, off.out, lambda m: "eos")
+    eng, (on,) = _stretch_serve(tiny, mtp, [(LONG, 40)], True)
+    assert on.out == off.out
+    assert eng.counters.get("draft_mtp_tokens", 0) == 0  # (a draft cut to nothing is never fed)
+    assert 0 < eng.counters["draft_mtp_cut"] <= 12  # (the back-off, inside the stretch: 1, 2, 4, 8, ... tokens between tries)
+    assert eng.counters["stretch_passes"] >= 40  # (every token of the reply came from a pass of the stretch)
+
+
+# -- the pipelined loop (issue #37, docs/adr/0002-pipelined-draft-loop.md) ---------------------------------------------
+
+
+def _oracle_at(tiny, mtp_file, truth, bad):
+    """The MTP layer, run as it is, with its draft at reply position ``m`` (the token after the m-th committed one) taken
+    from ``truth`` and changed where ``bad(m)`` says: True, a wrong token (the pass rejects it); "eos", the end-of-sequence
+    token (the draft is cut to nothing). Position-keyed, so the old loop (``draft``) and the pipelined one
+    (``draft_on_device``) see the same drafts at the same positions."""
+    from locals.mtp import MTP
+
+    n = len(truth) + 4
+    t = [truth[m] if m < len(truth) else EOS for m in range(n)]
+    alt = [EOS if bad(m) == "eos" else ((t[m] + 1) % 500 + 2 if bad(m) else t[m]) for m in range(n)]
+    dev = mx.array(alt, dtype=mx.int32)
+
+    class Oracle(MTP):
+        def draft(self, entry, out, r, k):
+            assert k == 1
+            return [alt[min(len(r.out), n - 1)]]
+
+        def draft_on_device(self, out, r, n_out):
+            return dev[mx.minimum(n_out, n - 1)].reshape(1)
+
+    return _as_oracle(Oracle, tiny, mtp_file, 1)
+
+
+def _stretch_engine(tiny, mtp, pipelined=True, backoff=None):
+    """An engine with MTP drafts, through the pipelined loop or the one that reads every pass, the back-off after
+    rejected drafts as given (None: each loop's default), and no prompt-lookup drafts."""
+    eng = _engine(tiny, mtp)
+    eng.mtp_pipelined, eng.mtp_backoff = pipelined, backoff
+    eng._solo_draft = lambda r, cache: []  # (no prompt-lookup drafts: the tiny model's reply repeats itself)
+    return eng
+
+
+def _stretch_serve(tiny, mtp, reqs, pipelined, lru=None, backoff=True, **kw):
+    """Serve ``reqs`` on a _stretch_engine; ``kw`` go to each Request (a temperature, a seed)."""
+    eng = _stretch_engine(tiny, mtp, pipelined, backoff)
+    out = _serve(eng, reqs, lru, **kw)
+    return eng, out
+
+
+def _arriving(first, second, after):
+    """A serve source: ``first`` at once, ``second`` once the first wrote ``after`` tokens."""
+    sent = []
+
+    def source(block):
+        if not sent:
+            sent.append(1)
+            return [first]
+        if len(sent) == 1 and len(first.out) >= after:
+            sent.append(1)
+            return [second]
+        return []
+
+    return source
+
+
+PATTERNS = {
+    "all kept": lambda m: False,
+    "every other rejected": lambda m: m % 2 == 1,
+    "rejected in runs": lambda m: m % 7 in (2, 3, 4),  # (the back-off doubles: 1, 2, 4 tokens without a draft)
+    "cut drafts": lambda m: "eos" if m % 5 == 3 else False,
+    "mixed": lambda m: "eos" if m % 11 == 6 else m % 3 == 1,
+}
+
+
+@pytest.mark.parametrize("pattern", list(PATTERNS))
+@pytest.mark.parametrize("backoff", [True, False])
+def test_the_pipelined_loop_gives_the_greedy_reply_of_mtp_off_and_a_dense_cache(tiny, mtp_file, pattern, backoff):
+    (off,) = _serve(_engine(tiny), [(LONG, 40)])
+    mtp = _oracle_at(tiny, mtp_file, off.out, PATTERNS[pattern])
+    lru = _lru()
+    eng, (on,) = _stretch_serve(tiny, mtp, [(LONG, 40)], True, lru, backoff=backoff)
+    assert on.out == off.out
+    assert eng.counters.get("stretch_passes", 0) > 0
+    assert 0 < eng.counters["draft_mtp_accepted"] <= eng.counters["draft_mtp_tokens"]
+    cache = lru.fetch_nearest_cache("locals", LONG + on.out + [0] * 20)[0]
+    assert len(set(_offsets(cache))) == 1, _offsets(cache)
+    assert _offsets(cache)[0] == len(LONG) - 1 + len(on.fed)  # dense: one slot per token fed
+    assert _real(cache[-1])[-1] == 0  # (the last fed token's slot: a hole, as the old loop leaves it)
+
+
+@pytest.mark.parametrize("pattern", list(PATTERNS))
+@pytest.mark.parametrize("seed", [3, 11])
+@pytest.mark.parametrize("backoff", [True, False])
+def test_a_seeded_request_gets_the_tokens_of_the_loop_that_reads_every_pass(tiny, mtp_file, pattern, seed, backoff):
+    """The ADR's regression test: the same seeded request through the loop that reads every pass before the next and
+    through the pipelined one, token for token, over kept drafts, rejected drafts, cut drafts and the back-off (the
+    patterns), with the back-off after rejected MTP drafts on and off in both. MTP off is not the reference (the two
+    rules draw different variates from the same key)."""
+    (off,) = _serve(_engine(tiny), [(LONG, 40)])
+    kw = {"temp": 0.9, "seed": seed, "backoff": backoff}
+    old_mtp = _oracle_at(tiny, mtp_file, off.out, PATTERNS[pattern])
+    _, (old,) = _stretch_serve(tiny, old_mtp, [(LONG, 40)], False, **kw)
+    new_mtp = _oracle_at(tiny, mtp_file, off.out, PATTERNS[pattern])
+    eng, (new,) = _stretch_serve(tiny, new_mtp, [(LONG, 40)], True, **kw)
+    assert new.out == old.out
+    # the pipelined loop gives a discarded pass's index back, so it ends at 40 draws for 40 tokens; the loop that reads
+    # every pass ends at 40 or 41, one more when its last step was launched by the main loop before the stop was read
+    # (the tokens above prove the indices agree up to the end)
+    assert new.draws == len(new.out) and old.draws - new.draws in (0, 1)
+    assert eng.counters.get("stretch_passes", 0) > 0 and eng.counters.get("draft_mtp_tokens", 0) > 0
+    assert new.out != off.out  # (sampled, not greedy)
+
+
+def test_a_request_arriving_during_a_stretch_joins_and_both_replies_are_mtp_off(tiny, mtp_file):
+    """A request arriving while the pipelined loop runs ends the stretch: the row's cache is compacted, the new row
+    joins, and both replies are MTP off's; the first row's kept cache is dense."""
+    other = [40, 41, 42, 43, 44, 45, 46, 47, 48]
+
+    def run(mtp):
+        from locals.packed import Request
+
+        lru = _lru()
+        eng = _stretch_engine(tiny, mtp)
+        first, second = Request(list(LONG), _free(), 40), Request(list(other), _free(), 20)
+        eng.serve(_arriving(first, second, 12), lru=lru)
+        return lru, eng, first, second
+
+    _, _, f0, s0 = run(None)
+    lru, eng, f1, s1 = run(_oracle_at(tiny, mtp_file, f0.out, PATTERNS["mixed"]))
+    assert (f1.out, s1.out) == (f0.out, s0.out)
+    assert eng.counters.get("stretch_passes", 0) > 0
+    for r in (f1, s1):
+        cache = lru.fetch_nearest_cache("locals", r.prompt + r.out + [0] * 20)[0]
+        assert len(set(_offsets(cache))) == 1, _offsets(cache)
+        assert _offsets(cache)[0] == len(r.prompt) - 1 + len(r.fed)
+
+
+def test_a_turn_continues_from_the_cache_a_stretch_left(tiny, mtp_file):
+    """The compacted cache is right, not only dense: a second request that extends the first one's prompt and reply
+    starts from its cache and gives MTP off's reply, with and without the pipelined loop."""
+    def run(mtp, pipelined):
+        lru = _lru()
+        eng = _stretch_engine(tiny, mtp, pipelined)
+        (a,) = _serve(eng, [(LONG, 30)], lru)
+        (b,) = _serve(eng, [(LONG + a.out + [77, 78, 79], 24)], lru)
+        return a, b
+
+    a0, b0 = run(None, True)
+    a1, b1 = run(_oracle_at(tiny, mtp_file, a0.out, PATTERNS["every other rejected"]), True)
+    assert (a1.out, b1.out) == (a0.out, b0.out)
+    assert b1.cached_tokens == len(LONG) + len(a0.out) - 1  # (it did start from the first one's cache: all but its last token)
+
+
+def test_a_stop_at_a_kept_draft_ends_where_the_loop_that_reads_every_pass_ends(tiny, mtp_file):
+    """A controller that finishes the reply at a token (a stop string, an end the grammar reaches): found one pass
+    late, the stop still ends the reply at that token, the pass launched after it is discarded, and the kept cache
+    holds the tokens fed and nothing after the stop, as with the loop that reads every pass."""
+    from locals.engine import Controller
+    from locals.packed import Request
+
+    class StopAt(Controller):
+        eos_ids = [EOS]
+
+        def __init__(self):
+            self.n = 0
+
+        def accept(self, token):
+            self.n += token == 257  # (the tiny model's reply repeats this token)
+
+        def finished(self):
+            return self.n >= 9
+
+    def run(mtp, pipelined):
+        lru = _lru()
+        eng = _stretch_engine(tiny, mtp, pipelined)
+        r = Request(list(LONG), StopAt(), 40)
+        waiting = [r]
+        eng.serve(lambda block: [waiting.pop()] if waiting else [], lru=lru)
+        return r, eng, lru.fetch_nearest_cache("locals", r.prompt + r.out + [0] * 20)[0]
+
+    off, _, _ = run(None, True)
+    assert off.finish == "stop" and 9 <= len(off.out) < 40
+    old, _, cache_old = run(_oracle_at(tiny, mtp_file, off.out, PATTERNS["all kept"]), False)
+    new, eng, cache_new = run(_oracle_at(tiny, mtp_file, off.out, PATTERNS["all kept"]), True)
+    assert (new.out, new.finish) == (off.out, "stop") == (old.out, old.finish)
+    assert new.fed == old.fed and len(new.fed) == len(new.out)  # (the prompt's last token in, the stop token never fed)
+    assert eng.counters.get("stretch_discarded", 0) == 1
+    assert _offsets(cache_new) == _offsets(cache_old) and _offsets(cache_new)[0] == len(LONG) - 1 + len(new.fed)
+    assert _real(cache_new[-1])[-1] == 0 == _real(cache_old[-1])[-1]
+
+
+def test_a_request_arriving_as_the_stop_is_read_is_still_served(tiny, mtp_file):
+    """A request that arrives in the pass whose picks end the first row (the stretch's two exits at once) joins after
+    the row retires and gets its reply."""
+    from locals.packed import Request
+
+    (off,) = _serve(_engine(tiny), [(LONG, 40)])
+    (other_off,) = _serve(_engine(tiny), [([40, 41, 42, 43, 44, 45, 46, 47, 48], 12)])
+    eng = _stretch_engine(tiny, _oracle_at(tiny, mtp_file, off.out, PATTERNS["all kept"]))
+    first, second = Request(list(LONG), _free(), 40), Request([40, 41, 42, 43, 44, 45, 46, 47, 48], _free(), 12)
+    eng.serve(_arriving(first, second, 38))  # (the pass read next commits tokens 39 and 40: the stop)
+    assert first.out == off.out and first.finish == "length"
+    assert second.out == other_off.out and second.finish == "length"
+
+
+def test_the_back_off_is_off_in_the_pipelined_loop_and_on_in_the_other_by_default(tiny, mtp_file):
+    """Decided on issue #37: with ``mtp_backoff`` unset, the pipelined loop drafts after every pass and the loop that
+    reads every pass (2 drafts, or ``mtp_pipelined`` off) keeps its back-off; set, both loops follow it."""
+    from locals.mtp import MTP
+
+    eng = _engine(tiny, MTP.load(tiny, mtp_file))
+    assert eng.mtp_backoff is None and not eng._mtp_backoff_on()
+    eng.mtp_pipelined = False
+    assert eng._mtp_backoff_on()
+    eng2 = _engine(tiny, MTP.load(tiny, mtp_file, drafts=2))
+    assert eng2._mtp_backoff_on()
+    eng2.mtp_backoff = False
+    assert not eng2._mtp_backoff_on()
+    eng.mtp_backoff = True
+    eng.mtp_pipelined = True
+    assert eng._mtp_backoff_on()
+    assert _engine(tiny)._mtp_backoff_on()  # (MTP off: the setting is moot, and reads as the loop that reads every pass)

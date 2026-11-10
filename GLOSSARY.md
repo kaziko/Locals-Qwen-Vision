@@ -25,5 +25,9 @@ The model's own extra layer that predicts the token after next from the main mod
 _Avoid_: MTP head, draft head, guess layer
 
 **Hole**:
-A position in a request's cache whose content later positions must not see: it is masked out of attention. The MTP layer's entry has one at each position the layer did not see.
+A position in a request's cache whose content later positions must not see: it is masked out of attention. The MTP layer's entry has one at each position the layer did not see; a stretch leaves one in the main cache at each rejected draft, until its end.
 _Avoid_: gap, masked slot, padding
+
+**Stretch**:
+The run of passes a request alone makes with one MTP draft each, one pass launched before the last one is read. It starts when the request has its draft and ends at a stop, a forced span or a request arriving, with its holes compacted away.
+_Avoid_: pipelined run, draft session, burst

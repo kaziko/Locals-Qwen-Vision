@@ -1,0 +1,9 @@
+tests/test_mtp_model.py through the server (Zwyrol, HF_HOME on the other disk), 2026-11-10. The run with the back-off on was on the first build of issue #37 (before the state gathers and the compiled bookkeeping, which change no reply); the run with it off on the committed build:
+
+LOCALS_MTP_BACKOFF unset (the back-off on):
+SKIPPED [1] tests/test_mtp_model.py:182: the turn before differed at a tie, so this turn's prompt differs
+40 passed, 1 skipped in 145.63s (0:02:25)
+
+LOCALS_MTP_BACKOFF=0:
+SKIPPED [2] tests/test_mtp_model.py:182: the turn before differed at a tie, so this turn's prompt differs
+39 passed, 2 skipped in 122.07s (0:02:02)

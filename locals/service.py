@@ -692,6 +692,8 @@ class BatchService:
             eos_ids = ()
 
         eng = HybridBatchEngine(rt.model, rt.tokenizer, n_slots=self.slots, mtp=_load_mtp(rt.model, bool(calc)))
+        v = os.environ.get("LOCALS_MTP_BACKOFF")  # (issue #37: the back-off after rejected MTP drafts; unset: each loop's own)
+        eng.mtp_backoff = None if v in (None, "") else v != "0"
         if eng.mtp is not None:  # (the memory plan below counts the layer's weights with the model's)
             self.weights_bytes += eng.mtp.nbytes
         # Qwenputer: a reply at a calc call stays in the batch, reading nothing, while its run is made (hybrid_batch's

@@ -1,0 +1,5 @@
+plain           98 tok/s async_eval median 5.87 ms x88
+stream          114 tok/s async_eval median 9.70 ms x59
+no gdn select   122 tok/s async_eval median 9.28 ms x56
+no token states 109 tok/s async_eval median 9.25 ms x62
+no mtp fill     76 tok/s async_eval median 8.55 ms x97

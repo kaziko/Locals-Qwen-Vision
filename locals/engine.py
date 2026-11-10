@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
@@ -287,10 +287,15 @@ class LocalsController(Controller):
         bt, _ = self.budget_tables()
         return r < bt.max_cost or bt.has_inf
 
-    def budget_mask(self, qg, r: Optional[int]):
+    def budget_mask(self, qg, r: Union[int, mx.array, None]):
         """Device bool mask over the vocabulary for r tokens left at device
-        state qg, or None when it would allow every allowed token."""
-        if not self.budget_active(r):
+        state qg, or None when it would allow every allowed token. ``r`` a
+        device value (the pipelined solo loop): the mask is built whenever
+        budgets are on (with r at or past every cost it allows every token)."""
+        if isinstance(r, mx.array):
+            if not self.budget:
+                return None
+        elif not self.budget_active(r):
             return None
         _, (cost, need, eos) = self.budget_tables()
         fits = cost[self._gpu_T()[:, qg].astype(mx.int32)] <= r
