@@ -107,3 +107,14 @@ for one seed today as well, with the same distribution.
    masked length costly, is a separate optimization.
 3. **The random stream**, as the section above: the same variates from the same key indices, in the same
    order as today's solo loop; the reference for the seeded test is that loop, not MTP off.
+
+## Outcome (issue #37, 2026-11-10)
+
+Built as `_solo_stream` in `locals/hybrid_batch.py`, measured in `docs/measurements/mtp/README.md` ("Issue #37"): the
+decode sweep at 1 request runs at 1.14x of MTP off with the back-off after rejected drafts as designed above, and at
+1.28x with it off (`LOCALS_MTP_BACKOFF=0`). The back-off was carried over from the loop that reads every pass, where a
+draft pass cost the pipelining; here a pass without a draft costs what a pass with one costs, so it only loses the
+draft's tokens. Which setting is the default is open (the owner's call); both keep the seeded regression test, each
+against the other loop at the same setting. The estimate of 1.35x assumed a pass at 1.17x of a step; measured, a pass
+costs the GPU about 11 ms against 7.6 for a step (the 2-token pass 9.4, the per-token states up to 0.6, the MTP layer
+and its draft through the output head 1.6), and both loops are bound by the GPU, not by the CPU reads this record removed.

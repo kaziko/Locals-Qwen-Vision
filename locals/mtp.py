@@ -82,14 +82,15 @@ def drafts_setting() -> int:
 
 class _Flagged:
     """The entry as the layer's attention sees it: the new keys go in with their flag column, and come back
-    without it."""
+    without it. ``offset``: the rope position of the first new slot when it is not the entry's own (a solo stretch
+    with holes, docs/adr/0002-pipelined-draft-loop.md: the logical position, a device value)."""
 
-    def __init__(self, entry, flags: mx.array):
-        self.entry, self.flags = entry, flags
+    def __init__(self, entry, flags: mx.array, offset=None):
+        self.entry, self.flags, self._offset = entry, flags, offset
 
     @property
     def offset(self):
-        return self.entry.offset
+        return self.entry.offset if self._offset is None else self._offset
 
     def update_and_fetch(self, keys, values):
         f = mx.broadcast_to(self.flags[:, None, :, None].astype(keys.dtype), keys.shape[:3] + (1,))
@@ -172,15 +173,16 @@ class MTP:
         causal = mx.arange(T)[None, :] <= (t0 + mx.arange(L))[:, None]  # (L, T)
         return real[:, None, None, :] & causal[None, None]
 
-    def fill(self, entry, hidden: mx.array, nexts: mx.array, flags: mx.array) -> mx.array:
+    def fill(self, entry, hidden: mx.array, nexts: mx.array, flags: mx.array, offset=None) -> mx.array:
         """Run the layer over the entry's next L positions: ``hidden`` (B, L, D) the main model's hidden states there
         (after its final norm), ``nexts`` (B, L) the token after each, ``flags`` (B, L) where ``nexts`` is known (a
-        False slot is written as a hole). Returns the layer's output (B, L, D), before its norm."""
+        False slot is written as a hole). ``offset``: the rope position of the first one, when the entry's own is not
+        it (a solo stretch with holes). Returns the layer's output (B, L, D), before its norm."""
         lay = self.layer
         e = self.lm.model.embed_tokens(nexts)
         x = lay.fc(mx.concatenate([lay.pre_fc_norm_embedding(e), lay.pre_fc_norm_hidden(hidden.astype(e.dtype))], axis=-1))
         mask = self._mask(entry, flags)
-        return lay.layers[0](x, mask=mask, cache=_Flagged(entry, flags))
+        return lay.layers[0](x, mask=mask, cache=_Flagged(entry, flags, offset))
 
     def logits(self, out: mx.array) -> mx.array:
         """Draft logits of the layer's output: its norm, then the main model's output head."""
@@ -190,6 +192,12 @@ class MTP:
     def tokens(logits: mx.array) -> mx.array:
         """The draft tokens of draft logits (..., V): their argmax."""
         return mx.argmax(logits, axis=-1)
+
+    def draft_on_device(self, out: mx.array, r, n_out: mx.array) -> mx.array:
+        """One draft from ``out`` (1, 1, D), the layer's output at the last real slot, as a device value (1,) for the
+        pipelined solo loop (docs/adr/0002-pipelined-draft-loop.md). ``n_out``: the request's committed tokens when
+        the draft is fed, a device count (a test oracle indexes a known reply with it)."""
+        return self.tokens(self.logits(out[:, -1:, :])).reshape(1).astype(mx.int32)
 
     def draft(self, entry, out: mx.array, r, n: int) -> List[int]:
         """``n`` (1 or 2) chained drafts from ``out`` (1, 1, D), the layer's output at the entry's last slot: the first

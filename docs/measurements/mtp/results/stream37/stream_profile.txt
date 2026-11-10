@@ -1,0 +1,2 @@
+plain 104 tok/s {'forward': '2.19ms x188', 'head_logits': '0.02ms x187', 'async_eval': '6.45ms x182', 'growth_trim': '0.00ms x187', 'gdn_at': '0.01ms x96'}
+stream 119 tok/s {'forward': '2.50ms x118 (sum 301)', 'fill': '0.09ms x118 (sum 12)', 'growth_trim': '0.00ms x117 (sum 0)', 'head_logits': '0.03ms x117 (sum 3)', 'async_eval': '9.82ms x117 (sum 1160)', 'draft_dev': '0.02ms x117 (sum 3)', 'gdn_at': '0.00ms x2808 (sum 14)', 'launch': '12.56ms x116 (sum 1501)', 'readback wait': '0.00ms x115 (sum 0)'}

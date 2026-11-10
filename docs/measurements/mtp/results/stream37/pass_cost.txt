@@ -1,0 +1,5 @@
+S=1 states=False: build 1.26 encode 1.35 wait 7.72 ms (sum 10.34)
+S=2 states=False: build 1.58 encode 1.37 wait 9.40 ms (sum 12.35)
+S=2 states=True: build 1.66 encode 1.41 wait 9.97 ms (sum 13.03)
+S=1 states=False: build 1.50 encode 1.49 wait 7.61 ms (sum 10.60)
+S=2 states=True: build 2.02 encode 2.16 wait 8.98 ms (sum 13.16)
