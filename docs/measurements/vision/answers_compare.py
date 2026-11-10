@@ -8,9 +8,13 @@ names = [n for n in a if not n.startswith("_")]
 same = 0
 for name in names:
     x, y = a[name].get("answers") or [], (b.get(name) or {}).get("answers") or []
-    ok = bool(y) and x == y
-    same += ok
-    verdict = "same answers" if ok else "DIFFER" if y else "DIFFER (missing in B)"
+    if not y:
+        verdict = "DIFFER (missing in B)"
+    elif x == y:
+        verdict = "same answers"
+        same += 1
+    else:
+        verdict = "DIFFER"
     firsts = [f"{side} {v[0][:60]!r}" for side, v in (("before", x), ("after", y)) if v]
     print("; ".join([f"{name}: {verdict}"] + firsts))
 print(f"{same} of {len(names)} pictures: the same answers before and after")

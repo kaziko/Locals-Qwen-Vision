@@ -16,10 +16,10 @@ srv = Server(model_id, engines=("locals",), preload=("locals",))
 ts, cached, answers = [], [], []
 for _ in range(4):
     request.empty_cache(srv)
-    a = srv.complete({"model": "locals", "max_tokens": 40, "temperature": 0, "messages": first})["choices"][0]["message"]["content"]
+    a = srv.complete(request.request(first, 40))["choices"][0]["message"]["content"]
     follow = first + [{"role": "assistant", "content": a}, {"role": "user", "content": "Which one is brighter?"}]
     t = time.perf_counter()
-    r = srv.complete({"model": "locals", "max_tokens": 1, "temperature": 0, "messages": follow})
+    r = srv.complete(request.request(follow))
     ts.append(time.perf_counter() - t)
     cached.append(r["usage"]["prompt_tokens_details"]["cached_tokens"]); answers.append(r["choices"][0]["message"]["content"])
 print(f"{model_id}: turn 2 of {r['usage']['prompt_tokens']} tokens, cached {cached[1:]}, median {statistics.median(ts[1:])*1000:.0f} ms "

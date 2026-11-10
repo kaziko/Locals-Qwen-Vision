@@ -46,8 +46,8 @@ PLACEHOLDERS = {QWEN: (IMAGE_TOKEN, None, None), GEMMA: (GEMMA_IMAGE_MARK, "<|im
 # 65,536 patches): a 2880x1800 screenshot was 5,000 tokens. 1M pixels is 1,024 tokens.
 MAX_PIXELS = 1 << 20
 # Gemma 4's processor: 16-pixel patches pooled 3x3, at most 280 soft tokens, both sides a multiple of 48.
-GEMMA_PATCH, GEMMA_POOL, GEMMA_MAX_SOFT_TOKENS = 16, 3, 280
 PATCH = 16  # both towers' patch side, in pixels
+GEMMA_PATCH, GEMMA_POOL, GEMMA_MAX_SOFT_TOKENS = PATCH, 3, 280
 
 
 class _Cut(NamedTuple):
@@ -208,7 +208,10 @@ def preprocess(raw: bytes, family: str = QWEN) -> Picture:
     # stream, which the engine's thread cannot use ("There is no Stream(gpu, 2) in current thread")
     fam = _family(family)
     cut = _CUTS[fam]
-    pixels = np.asarray(im, dtype=np.float32) / cut.divisor - cut.offset  # (h, w, 3)
+    pixels = np.asarray(im, dtype=np.float32)  # (h, w, 3); in place: one image-sized array, not three
+    pixels /= cut.divisor
+    if cut.offset:
+        pixels -= cut.offset
     hp, wp, m = hb // PATCH, wb // PATCH, cut.m
     x = pixels.reshape(hp // m, m, PATCH, wp // m, m, PATCH, 3).transpose(0, 3, 1, 4, 2, 5, 6)
     x = x.reshape(-1, PATCH * PATCH * 3)
