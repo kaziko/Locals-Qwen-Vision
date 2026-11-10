@@ -31,3 +31,15 @@ _Avoid_: gap, masked slot, padding
 **Stretch**:
 The run of passes a request alone makes with one MTP draft each, one pass launched before the last one is read. It starts when the request has its draft and ends at a stop, a forced span or a request arriving, with its holes compacted away.
 _Avoid_: pipelined run, draft session, burst
+
+**Tuning file**:
+This Mac's record of which kernel each matmul shape uses, with the timings that chose it. Each shape records the MLX version it was timed under.
+_Avoid_: tune cache, kernel cache
+
+**Stale shape**:
+A shape in the tuning file timed under another MLX version than the running one. It keeps its choice until it is timed again. A shape with no recorded version, or one pinned after it stopped locals twice, is never stale.
+_Avoid_: outdated shape, old timing
+
+**Seed**:
+Another tuning file, for this GPU, that a first start under a new MLX version begins from. Its shapes keep their recorded versions, so only those timed under another version are stale.
+_Avoid_: base file, starter file
