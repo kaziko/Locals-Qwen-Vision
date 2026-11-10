@@ -296,7 +296,8 @@ def _beyond_preset(data: dict) -> dict:
 
 
 def _seed() -> tuple:
-    """The file a first start under this MLX starts from, and what it holds: of the user files for this GPU (the one
+    """The file a start under this MLX with no file of its own (none yet, or a bad one set aside) starts from, and
+    what it holds: of the user files for this GPU (the one
     from before versioned names, ``tune_v6_<arch>.json``, and other versions'), the one written last that parses.
     ``(None, None)`` with ``LOCALS_TUNE_CACHE``, or with none. A file that does not parse is passed over, not set
     aside: it is another version's to deal with."""
@@ -306,14 +307,15 @@ def _seed() -> tuple:
         return None, None
     d = _os.path.dirname(_TUNE_PATH)
     versions = glob.glob(_os.path.join(glob.escape(d), _TUNE_STEM + "_mlx*.json"))
-    found = [p for p in [_os.path.join(d, _TUNE_FILE), *versions] if p != _TUNE_PATH and _os.path.isfile(p)]
-    def written(p):  # (a file another process set aside since: last in the order, and its read fails)
+    found = [p for p in [_shared_path(), *versions] if p and p != _TUNE_PATH and _os.path.isfile(p)]
+
+    def mtime_or_last(p):  # (a file another process set aside since: last in the order, and its read fails)
         try:
             return _os.path.getmtime(p)
         except OSError:
             return float("-inf")
 
-    for p in sorted(found, key=written, reverse=True):
+    for p in sorted(found, key=mtime_or_last, reverse=True):
         try:
             return p, _read_tune(p)
         except Exception:  # noqa: BLE001
@@ -338,6 +340,7 @@ def _load_tune():
                 except Exception:  # noqa: BLE001
                     pass
             user = seed = None
+            stuck = False  # (a bad file that could not be set aside: this load does not write over it)
             if _os.path.exists(_TUNE_PATH):
                 try:
                     user = _read_tune(_TUNE_PATH)
@@ -345,8 +348,8 @@ def _load_tune():
                     try:
                         _os.replace(_TUNE_PATH, _TUNE_PATH + ".bad")
                     except OSError:
-                        pass
-            if user is None:  # (none, or one set aside: a first start, or every shape was timed from scratch for good)
+                        stuck = True
+            if not _os.path.exists(_TUNE_PATH):  # (none, or a bad one set aside: unseeded, every shape timed again)
                 seed, user = _seed()  # (read only: the seed file stays as it is)
             for k, v in (user or {}).items():  # over the preset; a dict-valued key (__times__) entry by entry
                 tune[k] = {**tune[k], **v} if isinstance(v, dict) and isinstance(tune.get(k), dict) else v
@@ -354,7 +357,7 @@ def _load_tune():
             _TUNE = tune
             crashed = _crashed_shapes(tune)
             _drop_old_temps()
-            if (user is None and tune) or crashed or upgraded:
+            if ((user is None and tune) or crashed or upgraded) and not stuck:
                 try:
                     _save_tune()
                 except OSError:
@@ -464,8 +467,9 @@ def _alive(pid: int) -> bool:
 
 def _shared_path():
     """The user's file from before versioned names (``tune_v6_<arch>.json``, next to this version's), or ``None``
-    with ``LOCALS_TUNE_CACHE``."""
-    return None if _TUNE_PATH_FROM_ENV else _os.path.join(_os.path.dirname(_TUNE_PATH), _TUNE_FILE)
+    with ``LOCALS_TUNE_CACHE`` (or where it is this process's own file)."""
+    p = None if _TUNE_PATH_FROM_ENV else _os.path.join(_os.path.dirname(_TUNE_PATH), _TUNE_FILE)
+    return None if p == _TUNE_PATH else p
 
 
 def _drop_old_temps() -> None:
@@ -481,7 +485,7 @@ def _drop_old_temps() -> None:
         except OSError:
             pass
     shared = _shared_path()
-    if shared and shared != _TUNE_PATH:
+    if shared:
         try:
             with open(shared + ".lock") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # (an older locals saving now: raises, and it stays)
@@ -500,7 +504,7 @@ def _crashed_shapes(tune: dict) -> bool:
 
     changed = False
     shared = _shared_path()  # (a marker from before versioned names counts as well: it was never read, and stayed)
-    names = [_TUNE_PATH] + ([shared] if shared and shared != _TUNE_PATH else [])
+    names = [_TUNE_PATH] + ([shared] if shared else [])
     for m in [m for n in names for m in glob.glob(glob.escape(n) + ".tuning-*")]:
         try:
             pid = int(m.rsplit("-", 1)[1])

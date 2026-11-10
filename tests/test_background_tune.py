@@ -329,6 +329,40 @@ def test_a_crash_marker_under_the_name_from_before_versioned_files_counts_once(t
     assert not lock.exists()
 
 
+def test_a_bad_file_that_cannot_be_set_aside_is_not_seeded_over(tmp_path, monkeypatch):
+    """The seed's save read the file it could not rename as empty, and replaced it: no .bad copy was left."""
+    import json
+    import os
+
+    stem = _version_dir(tmp_path, monkeypatch)
+    (tmp_path / f"{stem}_mlx0.0.1.json").write_text(json.dumps({"__mlx__": "0.0.1", "1024x512x1": ["dense"]}))
+    mine = tmp_path / f"{stem}_mlx{mx.__version__}.json"
+    mine.write_text('{"1024x512x1": ["fr')
+    replace = os.replace
+
+    def no_bad(a, b):
+        if str(b).endswith(".bad"):
+            raise PermissionError(b)
+        return replace(a, b)
+
+    monkeypatch.setattr(os, "replace", no_bad)
+    assert "1024x512x1" not in kernels._load_tune()
+    assert mine.read_text() == '{"1024x512x1": ["fr'
+
+
+def test_a_crash_under_the_old_name_and_one_under_this_versions_pin_the_shape(tmp_path, monkeypatch):
+    import subprocess
+
+    _version_dir(tmp_path, monkeypatch)
+    dead = [subprocess.Popen(["true"]) for _ in range(2)]
+    for p in dead:
+        p.wait()
+    (tmp_path / f"{kernels._TUNE_FILE}.tuning-{dead[0].pid}").write_text("2560x4096x8")
+    (tmp_path / f"{kernels._TUNE_PATH.rsplit("/", 1)[1]}.tuning-{dead[1].pid}").write_text("2560x4096x8")
+    tune = kernels._load_tune()
+    assert tune["__crashed__"] == {"2560x4096x8": 2} and tune["2560x4096x8"] == ("mlx",)
+
+
 def test_a_shape_pinned_after_two_crashes_is_never_marked_stale(tmp_path, monkeypatch):
     """A shape that stopped locals twice keeps MLX's kernel (_crashed_shapes). Marked stale, the idle tuner timed it
     again under the MLX that had aborted twice, and nothing took it off the list, so the server aborted at every

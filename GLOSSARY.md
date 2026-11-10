@@ -41,5 +41,5 @@ A shape in the tuning file timed under another MLX version than the running one.
 _Avoid_: outdated shape, old timing
 
 **Seed**:
-Another tuning file, for this GPU, that a first start under a new MLX version begins from. Its shapes keep their recorded versions, so only those timed under another version are stale.
+Another tuning file, for this GPU, that a start under an MLX version with no file of its own begins from: a first start, or one whose file did not parse and was set aside. Its shapes keep their recorded versions, so only those timed under another version are stale.
 _Avoid_: base file, starter file

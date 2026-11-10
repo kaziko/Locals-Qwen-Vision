@@ -4,7 +4,8 @@
 
 - **Tuning-file seed and cleanup fixes** (issue #32). A load no longer raises when a seed candidate disappears during
   the search (another process set its bad file aside). A file for this MLX version that does not parse is set aside
-  as `.bad` and the load seeds as a first start would, instead of timing every shape from scratch. Crash markers left
+  as `.bad` and the load seeds as a first start would, instead of timing every shape from scratch. When that rename
+  fails, the load no longer writes over the bad file. Crash markers left
   under the shared name from before versioned files are counted, like any dead process's marker, and removed; that
   name's `.lock` file is removed once no process holds it.
 - **Warm-up keys a layer's kernel choice on the activations' dtype** (issue #25). Warm-up and tuning built their
