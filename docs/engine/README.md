@@ -297,7 +297,7 @@ for the next draft. Entering from pipelined steps, the last one-row step's hidde
 `counters` give `draft_lookup_tokens`, `draft_lookup_accepted`, `draft_mtp_tokens` and `draft_mtp_accepted`.
 Measurements: `docs/measurements/mtp/README.md`.
 
-**One draft, pipelined** (`_solo_stream`, issue #37, `docs/adr/0002-pipelined-draft-loop.md`). With 1 draft a pass
+**One draft, pipelined** (`_solo_stretch`, issue #37, `docs/adr/0002-pipelined-draft-loop.md`). With 1 draft a pass
 (`LOCALS_MTP_DRAFTS=1`, the default), a row alone that has its MTP draft runs a stretch of passes in which pass p+1 is
 launched before pass p is read: the next token, the next draft, the recurrent state after the kept tokens, the grammar
 state and the logical position are device values computed from pass p's logits. A rejected draft's slot stays in the
@@ -306,14 +306,14 @@ path takes the row's logical position instead of the stored count (`rope_offset`
 entry gets the same slot with its own flag. The CPU reads pass p's picks while pass p+1 runs and commits them one pass
 behind, streaming included. A stop found there (an end of sequence, `finished()`, `max_tokens`) or a forced span
 discards pass p+1, which gives its random-stream key index back; the stretch ends there, when a request arrives, or
-at a stop, with a compaction (`_stream_compact`) that moves the real slots down over the holes, so a kept cache, a
+at a stop, with a compaction (`_stretch_compact`) that moves the real slots down over the holes, so a kept cache, a
 joining row or a prompt-cache entry sees a dense cache at one offset. A draft that `_draft_checked` would cut (an end
 of sequence, the grammar, the budget) and the back-off after rejections become one device flag, `valid`: a pass with it
 false feeds the draft all the same, samples x's successor by the draft-less rule and leaves the draft's slot a hole,
 so a seeded request draws the same variates from the same key indices as the loop that reads every pass (the
 regression test in `tests/test_mtp.py`; `eng.mtp_pipelined = False` runs that loop). Prompt-lookup drafts are not
 consulted inside a stretch: a row with one at the boundary runs it first, as above, and the stretch starts when it has
-none. `counters` add `stream_passes`, `stream_discarded` and `draft_mtp_cut` (passes whose draft was cut to nothing).
+none. `counters` add `stretch_passes`, `stretch_discarded` and `draft_mtp_cut` (passes whose draft was cut to nothing).
 The back-off after rejected drafts paid in the loop that reads every pass, where a draft pass cost the pipelining; in
 the pipelined loop a pass without a draft costs the same as one with it, so `mtp_backoff = False`
 (`LOCALS_MTP_BACKOFF=0`) drafts after every pass, in both loops (a cut draft still waits one pass, as the other loop
@@ -467,6 +467,6 @@ Any other exception escapes `serve`, for example a Metal out-of-memory error. `B
 | `deferred` | Requests held back for memory (each counted once, however many steps it waits) |
 | `cache_trims` | Times `_trim_for` evicted prompt-cache entries |
 | `solo_steps`, `drafted` | Steps of a request alone (`_solo`), and the draft tokens they kept |
-| `stream_passes`, `stream_discarded`, `draft_mtp_cut` | Passes of the pipelined MTP loop (`_solo_stream`), those discarded (launched on a token a stop or a forced span then overtook), and passes whose draft was cut to nothing |
+| `stretch_passes`, `stretch_discarded`, `draft_mtp_cut` | Passes of the pipelined MTP loop (`_solo_stretch`), those discarded (launched on a token a stop or a forced span then overtook), and passes whose draft was cut to nothing |
 
 The service wraps `eng._launch` to publish `active` and `tokens_out` on every step.

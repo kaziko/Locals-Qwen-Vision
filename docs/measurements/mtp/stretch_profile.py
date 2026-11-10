@@ -1,7 +1,7 @@
 """Issue #37: where a pass of the pipelined loop spends its time, in process, greedy: the CPU building the pass (Python),
 mx.async_eval (encoding, and the wait for the pass before it to leave the GPU), the wait for its readback; and the
-same for a plain step (MTP off). stream_ablation.py times the pass with parts of it skipped.
-Run from the repo root: HF_HOME=... LOCALS_DISK_CACHE=0 .venv/bin/python docs/measurements/mtp/stream_profile.py <model> <mtp file>
+same for a plain step (MTP off). stretch_ablation.py times the pass with parts of it skipped.
+Run from the repo root: HF_HOME=... LOCALS_DISK_CACHE=0 .venv/bin/python docs/measurements/mtp/stretch_profile.py <model> <mtp file>
 """
 import sys, time, mlx.core as mx
 sys.path.insert(0, "tests")
@@ -29,12 +29,12 @@ hb._gdn_at = timed("gdn_at", hb._gdn_at)
 MTP.fill = timed("fill", MTP.fill)
 MTP.draft_on_device = timed("draft_dev", MTP.draft_on_device)
 HybridBatchEngine._growth_trim = timed("growth_trim", HybridBatchEngine._growth_trim)
-HybridBatchEngine._stream_launch = timed("launch", HybridBatchEngine._stream_launch)
-o_commit = HybridBatchEngine._stream_commit
+HybridBatchEngine._stretch_launch = timed("launch", HybridBatchEngine._stretch_launch)
+o_commit = HybridBatchEngine._stretch_commit
 def commit(self, ctx, cur, dead, holes):
     t = time.perf_counter(); cur["rb"].tolist(); T.setdefault("readback wait", []).append(time.perf_counter() - t)
     return o_commit(self, ctx, cur, dead, holes)
-HybridBatchEngine._stream_commit = commit
+HybridBatchEngine._stretch_commit = commit
 lm = hb.text_model(rt.model)
 body = lm.model
 orig_call = type(body).__call__

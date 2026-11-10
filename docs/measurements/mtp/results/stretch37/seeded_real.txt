@@ -1,30 +1,30 @@
-en-explain     greedy: off/new first diff 19 (143 tok) old/new 19 | mtp 40/58 passes 100 discarded 1 | tok/s off 105 old 109 new 98
+en-explain     greedy: off/new first diff 19 (143 tok) old/new 19 | mtp 40/58 passes 100 discarded 1 | tok/s off 102 old 108 new 103
                seed 1: old/new first diff None (163 vs 163 tok) mtp 42/67
                seed 2: old/new first diff 143 (190 vs 175 tok) mtp 46/68
-code           greedy: off/new first diff None (192 tok) old/new None | mtp 76/88 passes 116 discarded 1 | tok/s off 106 old 114 new 114
+code           greedy: off/new first diff None (192 tok) old/new None | mtp 76/88 passes 116 discarded 1 | tok/s off 105 old 108 new 123
                seed 1: old/new first diff 44 (192 vs 192 tok) mtp 78/88
                seed 2: old/new first diff 22 (192 vs 192 tok) mtp 74/86
-pl-email       greedy: off/new first diff None (150 tok) old/new None | mtp 52/66 passes 99 discarded 1 | tok/s off 108 old 105 new 103
+pl-email       greedy: off/new first diff None (150 tok) old/new None | mtp 52/66 passes 99 discarded 1 | tok/s off 107 old 107 new 110
                seed 1: old/new first diff 38 (160 vs 192 tok) mtp 44/65
                seed 2: old/new first diff 37 (192 vs 192 tok) mtp 39/66
-pl-explain     greedy: off/new first diff None (192 tok) old/new None | mtp 56/81 passes 136 discarded 1 | tok/s off 106 old 93 new 98
+pl-explain     greedy: off/new first diff None (192 tok) old/new None | mtp 56/81 passes 136 discarded 1 | tok/s off 103 old 96 new 106
                seed 1: old/new first diff 91 (192 vs 192 tok) mtp 54/78
                seed 2: old/new first diff 159 (192 vs 192 tok) mtp 26/42
-json           greedy: off/new first diff None (173 tok) old/new None | mtp 72/81 passes 102 discarded 1 | tok/s off 102 old 103 new 118
+json           greedy: off/new first diff None (173 tok) old/new None | mtp 72/81 passes 102 discarded 1 | tok/s off 103 old 97 new 126
                seed 1: old/new first diff 21 (175 vs 172 tok) mtp 75/82
                seed 2: old/new first diff 36 (179 vs 175 tok) mtp 76/83
-summary        greedy: off/new first diff None (81 tok) old/new None | mtp 30/36 passes 52 discarded 1 | tok/s off 89 old 98 new 92
+summary        greedy: off/new first diff None (81 tok) old/new None | mtp 30/36 passes 52 discarded 1 | tok/s off 89 old 96 new 101
                seed 1: old/new first diff 46 (97 vs 87 tok) mtp 28/38
                seed 2: old/new first diff 53 (87 vs 98 tok) mtp 35/44
-math           greedy: off/new first diff 15 (192 tok) old/new None | mtp 86/92 passes 106 discarded 1 | tok/s off 104 old 114 new 126
+math           greedy: off/new first diff 15 (192 tok) old/new None | mtp 86/92 passes 106 discarded 1 | tok/s off 105 old 114 new 136
                seed 1: old/new first diff 77 (192 vs 192 tok) mtp 89/93
                seed 2: old/new first diff 92 (192 vs 192 tok) mtp 89/93
-code-convert   greedy: off/new first diff None (192 tok) old/new None | mtp 77/89 passes 115 discarded 1 | tok/s off 102 old 107 new 112
+code-convert   greedy: off/new first diff None (192 tok) old/new None | mtp 77/89 passes 115 discarded 1 | tok/s off 104 old 105 new 124
                seed 1: old/new first diff 79 (192 vs 192 tok) mtp 75/87
                seed 2: old/new first diff 58 (192 vs 192 tok) mtp 77/89
-tool-call      greedy: off/new first diff None (39 tok) old/new None | mtp 19/19 passes 21 discarded 1 | tok/s off 52 old 51 new 60
+tool-call      greedy: off/new first diff None (39 tok) old/new None | mtp 19/19 passes 21 discarded 1 | tok/s off 52 old 59 new 63
                seed 1: old/new first diff None (39 vs 39 tok) mtp 19/19
                seed 2: old/new first diff None (39 vs 39 tok) mtp 19/19
-chat           greedy: off/new first diff None (192 tok) old/new None | mtp 66/81 passes 126 discarded 1 | tok/s off 107 old 103 new 108
+chat           greedy: off/new first diff None (192 tok) old/new None | mtp 66/81 passes 126 discarded 1 | tok/s off 108 old 106 new 118
                seed 1: old/new first diff 170 (192 vs 192 tok) mtp 45/71
                seed 2: old/new first diff 87 (192 vs 192 tok) mtp 61/80

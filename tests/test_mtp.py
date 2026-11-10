@@ -150,8 +150,15 @@ def _oracle(tiny, mtp_file, truth, wrong, drafts):
             m = len(r.out)
             return [(truth[m + i] + 1) % 500 + 2 if wrong(k, i) else truth[m + i] for i in range(n) if m + i < len(truth)]
 
+    return _as_oracle(Oracle, tiny, mtp_file, drafts)
+
+
+def _as_oracle(cls, tiny, mtp_file, drafts):
+    """The MTP layer of ``mtp_file``, loaded as usual, wrapped as the oracle class ``cls``."""
+    from locals.mtp import MTP
+
     base = MTP.load(tiny, mtp_file, drafts=drafts)
-    o = Oracle(tiny, base.layer, drafts)
+    o = cls(tiny, base.layer, drafts)
     o.dtype = base.dtype
     return o
 
@@ -366,11 +373,11 @@ def test_a_draft_cut_to_nothing_backs_off(tiny, mtp_file):
     assert on.out == off.out
     assert 0 < len(mtp.seen) <= 12, len(mtp.seen)  # (1, 2, 4, 8, ... tokens between tries: not one try a token)
     mtp = _oracle_at(tiny, mtp_file, off.out, lambda m: "eos")
-    eng, (on,) = _stream_serve(tiny, mtp, [(LONG, 40)], True)
+    eng, (on,) = _stretch_serve(tiny, mtp, [(LONG, 40)], True)
     assert on.out == off.out
     assert eng.counters.get("draft_mtp_tokens", 0) == 0  # (a draft cut to nothing is never fed)
     assert 0 < eng.counters["draft_mtp_cut"] <= 12  # (the back-off, inside the stretch: 1, 2, 4, 8, ... tokens between tries)
-    assert eng.counters["stream_passes"] >= 40  # (every token of the reply came from a pass of the stretch)
+    assert eng.counters["stretch_passes"] >= 40  # (every token of the reply came from a pass of the stretch)
 
 
 # -- the pipelined loop (issue #37, docs/adr/0002-pipelined-draft-loop.md) ---------------------------------------------
@@ -396,13 +403,12 @@ def _oracle_at(tiny, mtp_file, truth, bad):
         def draft_on_device(self, out, r, n_out):
             return dev[mx.minimum(n_out, n - 1)].reshape(1)
 
-    base = MTP.load(tiny, mtp_file, drafts=1)
-    o = Oracle(tiny, base.layer, 1)
-    o.dtype = base.dtype
-    return o
+    return _as_oracle(Oracle, tiny, mtp_file, 1)
 
 
-def _stream_serve(tiny, mtp, reqs, pipelined, lru=None, backoff=True, **kw):
+def _stretch_serve(tiny, mtp, reqs, pipelined, lru=None, backoff=True, **kw):
+    """Serve ``reqs`` with MTP drafts, through the pipelined loop or the one that reads every pass, with or without the
+    back-off after rejected drafts, and no prompt-lookup drafts; ``kw`` go to each Request (a temperature, a seed)."""
     eng = _engine(tiny, mtp)
     eng.mtp_pipelined, eng.mtp_backoff = pipelined, backoff
     eng._solo_draft = lambda r, cache: []  # (no prompt-lookup drafts: the tiny model's reply repeats itself)
@@ -425,9 +431,9 @@ def test_the_pipelined_loop_gives_the_greedy_reply_of_mtp_off_and_a_dense_cache(
     (off,) = _serve(_engine(tiny), [(LONG, 40)])
     mtp = _oracle_at(tiny, mtp_file, off.out, PATTERNS[pattern])
     lru = _lru()
-    eng, (on,) = _stream_serve(tiny, mtp, [(LONG, 40)], True, lru, backoff=backoff)
+    eng, (on,) = _stretch_serve(tiny, mtp, [(LONG, 40)], True, lru, backoff=backoff)
     assert on.out == off.out
-    assert eng.counters.get("stream_passes", 0) > 0
+    assert eng.counters.get("stretch_passes", 0) > 0
     assert 0 < eng.counters["draft_mtp_accepted"] <= eng.counters["draft_mtp_tokens"]
     cache = lru.fetch_nearest_cache("locals", LONG + on.out + [0] * 20)[0]
     assert len(set(_offsets(cache))) == 1, _offsets(cache)
@@ -446,14 +452,15 @@ def test_a_seeded_request_gets_the_tokens_of_the_loop_that_reads_every_pass(tiny
     (off,) = _serve(_engine(tiny), [(LONG, 40)])
     kw = {"temp": 0.9, "seed": seed, "backoff": backoff}
     old_mtp = _oracle_at(tiny, mtp_file, off.out, PATTERNS[pattern])
-    _, (old,) = _stream_serve(tiny, old_mtp, [(LONG, 40)], False, **kw)
+    _, (old,) = _stretch_serve(tiny, old_mtp, [(LONG, 40)], False, **kw)
     new_mtp = _oracle_at(tiny, mtp_file, off.out, PATTERNS[pattern])
-    eng, (new,) = _stream_serve(tiny, new_mtp, [(LONG, 40)], True, **kw)
+    eng, (new,) = _stretch_serve(tiny, new_mtp, [(LONG, 40)], True, **kw)
     assert new.out == old.out
-    # (new.draws is one less: the loop that reads every pass ends with a plain step launched before the stop was read,
-    # which took a key index; the pipelined loop gives a discarded pass's index back)
-    assert new.draws <= old.draws
-    assert eng.counters.get("stream_passes", 0) > 0 and eng.counters.get("draft_mtp_tokens", 0) > 0
+    # the pipelined loop gives a discarded pass's index back, so it ends at 40 draws for 40 tokens; the loop that reads
+    # every pass ends at 40 or 41, one more when its last step was launched by the main loop before the stop was read
+    # (the tokens above prove the indices agree up to the end)
+    assert new.draws == len(new.out) and old.draws - new.draws in (0, 1)
+    assert eng.counters.get("stretch_passes", 0) > 0 and eng.counters.get("draft_mtp_tokens", 0) > 0
     assert new.out != off.out  # (sampled, not greedy)
 
 
@@ -486,7 +493,7 @@ def test_a_request_arriving_during_a_stretch_joins_and_both_replies_are_mtp_off(
     _, _, f0, s0 = run(None)
     lru, eng, f1, s1 = run(_oracle_at(tiny, mtp_file, f0.out, PATTERNS["mixed"]))
     assert (f1.out, s1.out) == (f0.out, s0.out)
-    assert eng.counters.get("stream_passes", 0) > 0
+    assert eng.counters.get("stretch_passes", 0) > 0
     for r in (f1, s1):
         cache = lru.fetch_nearest_cache("locals", r.prompt + r.out + [0] * 20)[0]
         assert len(set(_offsets(cache))) == 1, _offsets(cache)
@@ -546,6 +553,32 @@ def test_a_stop_at_a_kept_draft_ends_where_the_loop_that_reads_every_pass_ends(t
     new, eng, cache_new = run(_oracle_at(tiny, mtp_file, off.out, PATTERNS["all kept"]), True)
     assert (new.out, new.finish) == (off.out, "stop") == (old.out, old.finish)
     assert new.fed == old.fed and len(new.fed) == len(new.out)  # (the prompt's last token in, the stop token never fed)
-    assert eng.counters.get("stream_discarded", 0) == 1
+    assert eng.counters.get("stretch_discarded", 0) == 1
     assert _offsets(cache_new) == _offsets(cache_old) and _offsets(cache_new)[0] == len(LONG) - 1 + len(new.fed)
     assert _real(cache_new[-1])[-1] == 0 == _real(cache_old[-1])[-1]
+
+
+def test_a_request_arriving_as_the_stop_is_read_is_still_served(tiny, mtp_file):
+    """A request that arrives in the pass whose picks end the first row (the stretch's two exits at once) joins after
+    the row retires and gets its reply."""
+    from locals.packed import Request
+
+    (off,) = _serve(_engine(tiny), [(LONG, 40)])
+    (other_off,) = _serve(_engine(tiny), [([40, 41, 42, 43, 44, 45, 46, 47, 48], 12)])
+    eng = _engine(tiny, _oracle_at(tiny, mtp_file, off.out, PATTERNS["all kept"]))
+    eng._solo_draft = lambda r, cache: []
+    first, second = Request(list(LONG), _free(), 40), Request([40, 41, 42, 43, 44, 45, 46, 47, 48], _free(), 12)
+    sent = []
+
+    def source(block):
+        if not sent:
+            sent.append(1)
+            return [first]
+        if len(sent) == 1 and len(first.out) >= 38:  # (the pass read next commits tokens 39 and 40: the stop)
+            sent.append(1)
+            return [second]
+        return []
+
+    eng.serve(source)
+    assert first.out == off.out and first.finish == "length"
+    assert second.out == other_off.out and second.finish == "length"

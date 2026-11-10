@@ -1,6 +1,7 @@
 """Issue #37: the repeated-file workload of tests/test_solo.py (prompt-lookup drafts' best case), greedy, in process:
 MTP off (lookup drafts), MTP on with the loop that reads every pass, MTP on pipelined (no lookups inside a stretch).
-Three rounds each, interleaved; prints tokens, tok/s and the draft counters.Run from the repo root: .venv/bin/python docs/measurements/mtp/edit_workload.py <model> <mtp file>
+Three rounds each, interleaved; prints tokens, tok/s and the draft counters.
+Run from the repo root: .venv/bin/python docs/measurements/mtp/edit_workload.py <model> <mtp file>
 """
 import sys, time, mlx.core as mx
 sys.path.insert(0, "tests")
@@ -22,7 +23,7 @@ def run(use, pipelined):
     r = Request(list(p), Free(), 300); w = [r]
     t = time.perf_counter(); eng.serve(lambda b: [w.pop()] if w else []); dt = time.perf_counter() - t
     c = eng.counters
-    return r.out, len(r.out) / dt, {k: c.get(k, 0) for k in ("steps", "solo_steps", "drafted", "draft_lookup_tokens", "draft_lookup_accepted", "draft_mtp_tokens", "draft_mtp_accepted", "stream_passes", "stream_discarded")}
+    return r.out, len(r.out) / dt, {k: c.get(k, 0) for k in ("steps", "solo_steps", "drafted", "draft_lookup_tokens", "draft_lookup_accepted", "draft_mtp_tokens", "draft_mtp_accepted", "stretch_passes", "stretch_discarded")}
 run(False, True)  # warm-up
 outs = {}
 for rnd in range(3):

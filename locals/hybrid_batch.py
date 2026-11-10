@@ -17,7 +17,7 @@ import json
 import os
 import time
 from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import mlx.core as mx
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, BatchRotatingKVCache, KVCache, make_prompt_cache
@@ -212,8 +212,8 @@ def _gdn_at(c, ts: mx.array, token_conv, keep, conv_idx=None) -> None:
 
 
 @mx.compile
-def _stream_book(kept, valid, keep, backoff, first, x_next, n_out, miss, resume, pos, bo):
-    """The bookkeeping of a pass of the pipelined solo loop (_stream_launch), as one compiled function (one kernel or
+def _stretch_book(kept, valid, keep, backoff, first, x_next, n_out, miss, resume, pos, bo):
+    """The bookkeeping of a pass of the pipelined solo loop (_stretch_launch), as one compiled function (one kernel or
     two where some thirty small ones each cost their encoding): the committed count, the back-off (as _solo keeps it
     with ``bo``, mtp_backoff: a rejected or cut draft waits 1, 2, 4, ... 32 tokens; without it a cut draft still waits
     one pass, as the loop that reads every pass does, which leaves _solo for a cut and comes back a step later), the
@@ -317,7 +317,7 @@ _grow_one_layer_at_a_time(KVCache)
 
 def _mask_holes(cls) -> None:
     """A batch layer's mask also hides its holes (GLOSSARY.md): with ``real`` set on the layer, a (B, written) device
-    flag per stored slot (a solo stretch with pipelined drafts, _solo_stream), the mask is false wherever it is. The new
+    flag per stored slot (a solo stretch with pipelined drafts, _solo_stretch), the mask is false wherever it is. The new
     positions of the pass are real while it runs."""
     if getattr(cls, "_locals_holes_patch", False):
         return
@@ -676,7 +676,7 @@ class HybridBatchEngine(BatchEngine):
         self.mtp = mtp
         self._n_main = len(make_prompt_cache(model))
         self._stash = None  # (MTP entry, position, hidden state): the last one-row step's, for the MTP layer (_launch1)
-        # with 1 MTP draft, the pipelined solo loop (_solo_stream, docs/adr/0002-pipelined-draft-loop.md); False: the
+        # with 1 MTP draft, the pipelined solo loop (_solo_stretch, docs/adr/0002-pipelined-draft-loop.md); False: the
         # loop that reads every pass before the next (the reference of the seeded regression test, tests/test_mtp.py)
         self.mtp_pipelined = True
         # the back-off after rejected MTP drafts (solo_miss, solo_resume: 1, 2, 4, ... 32 tokens without one). It pays
@@ -1400,6 +1400,12 @@ class HybridBatchEngine(BatchEngine):
         stays for prompt lookup only)."""
         return self._draft_checked(r, self.mtp.draft(entry, r.mtp_out, r, self.mtp.drafts), constrained)
 
+    def _solo_counted(self) -> None:
+        """One pass of a row alone, counted as a step of one row."""
+        self.counters["steps"] += 1
+        self.counters["rows"] += 1
+        self.counters["solo_steps"] = self.counters.get("solo_steps", 0) + 1
+
     def _solo(self, r, cache, x: int, g, temp: float, arrive, dead: set):
         """Steps for the only running row while it has a forced span or a draft to feed. Returns (requests that
         arrived meanwhile, the next token to feed, its constraint state); x None: the row is done."""
@@ -1422,10 +1428,10 @@ class HybridBatchEngine(BatchEngine):
             prime = False  # a pass of x alone: the MTP layer has nothing at the last position to draft from yet
             if use:
                 self._mtp_last(r, entry, x)
-                if not span and not draft and (not self.mtp_backoff or len(r.out) >= getattr(r, "solo_resume", 0)):
+                if not span and not draft and self._mtp_wants(r, cache):
                     if getattr(r, "mtp_at", None) == _write_at(entry):
                         if self.mtp.drafts == 1 and self.mtp_pipelined:
-                            got, x, g = self._solo_stream(r, cache, x, g, temp, arrive, dead)
+                            got, x, g = self._solo_stretch(r, cache, x, g, temp, arrive, dead)
                             if got or x is None:
                                 return got, x, g
                             continue  # a forced span: fed in one pass, as above
@@ -1450,9 +1456,7 @@ class HybridBatchEngine(BatchEngine):
                 for c in cache:
                     if isinstance(c, ArraysCache):
                         c.want_states = False
-            self.counters["steps"] += 1
-            self.counters["rows"] += 1
-            self.counters["solo_steps"] = self.counters.get("solo_steps", 0) + 1
+            self._solo_counted()
             self._growth_trim(1, 64)  # (a pass feeds up to 33 tokens)
             logits = head_logits(self.lm, h[:, len(span):, :])[0]  # the last certain token, then each draft token
             gs = g
@@ -1534,7 +1538,20 @@ class HybridBatchEngine(BatchEngine):
     # slot, with its own flag. The CPU reads pass p's picks while pass p+1 runs and commits them; a stop or a forced
     # span found there discards pass p+1, and the stretch ends with a compaction, so all after it sees a dense cache.
 
-    def _solo_stream(self, r, cache, x, g, temp, arrive, dead):
+    class _Stretch(NamedTuple):
+        """What every pass of a stretch shares: the row, its attention layers, its recurrent layers, the MTP entry,
+        and its sampling (a grammar or not, the temperature, the end-of-sequence tokens, a seed, its own settings)."""
+        r: Request
+        fa: list
+        rec: list
+        entry: object
+        constrained: bool
+        t_r: float
+        eos: Optional[mx.array]
+        seeded: bool
+        own: bool
+
+    def _solo_stretch(self, r, cache, x, g, temp, arrive, dead):
         """Passes for the only running row while its MTP drafts run pipelined. Returns as _solo does: (requests that
         arrived meanwhile, the next token to feed, its constraint state); x None: the row is done; with ``r.pend`` set
         or a token the grammar forced: a forced span, for _solo to feed in one pass."""
@@ -1549,24 +1566,24 @@ class HybridBatchEngine(BatchEngine):
         eos = set(r.controller.eos_ids) or set(self.tokenizer.eos_token_ids)
         seeded = getattr(r, "seed", None) is not None and t_r > 0
         own = any(getattr(r, a, None) is not None for a in ("temp", "top_p", "top_k", "seed"))
-        ctx = (r, fa, rec, entry, constrained, t_r, mx.array(sorted(eos), dtype=mx.int32) if eos else None, seeded, own)
+        ctx = self._Stretch(r, fa, rec, entry, constrained, t_r, mx.array(sorted(eos), dtype=mx.int32) if eos else None, seeded, own)
         n_out = mx.array(len(r.out), dtype=mx.int32)
         st = {"x": mx.array([x], dtype=mx.int32), "d": self.mtp.draft_on_device(r.mtp_out, r, n_out), "g": g,
               "pos": fa[0].offset, "n_out": n_out,  # (the row's logical position: its offset less its left padding)
               "miss": mx.array(getattr(r, "solo_miss", 0), dtype=mx.int32),
               "resume": mx.array(getattr(r, "solo_resume", 0), dtype=mx.int32), "real": mx.ones((1, base), dtype=mx.bool_)}
         holes: List[int] = []  # the slots of rejected drafts, as the CPU reads them
-        cur = self._stream_launch(ctx, cache, st, base)
+        cur = self._stretch_launch(ctx, cache, st, base)
         while True:
             got = arrive(False)
-            nxt = None if got else self._stream_launch(ctx, cache, cur["next"], cur["slot"] + 2)
-            end = self._stream_commit(ctx, cur, dead, holes)
+            nxt = None if got else self._stretch_launch(ctx, cache, cur["next"], cur["slot"] + 2)
+            end = self._stretch_commit(ctx, cur, dead, holes)
             if end is None and not got:
                 cur = nxt
                 continue
-            return got, *self._stream_end(ctx, cur, end, nxt, holes, base)
+            return got, *self._stretch_end(ctx, cur, end, nxt, holes, base)
 
-    def _stream_launch(self, ctx, cache, st, slot: int) -> dict:
+    def _stretch_launch(self, ctx, cache, st, slot: int) -> dict:
         """One pass of ``[x, d]`` from the device state ``st`` (x the token to feed, d the draft after it, g the grammar
         state after x, pos its logical position, n_out the committed tokens, miss and resume the back-off, real the
         flags of the stored slots), written at ``slot``. Its picks and the next pass's state are device values; one
@@ -1577,7 +1594,7 @@ class HybridBatchEngine(BatchEngine):
         # the back-off after rejections, as the loop that reads every pass has it: that loop leaves _solo for plain
         # steps until the row's committed tokens reach solo_resume, and the main loop, which reads a step while the
         # next runs, commits one token more before the boundary that brings it back
-        backoff = n_out <= resume  # (without mtp_backoff, resume moves only at a cut draft: _stream_book)
+        backoff = n_out <= resume  # (without mtp_backoff, resume moves only at a cut draft: _stretch_book)
         # the draft is fed only if it is one _draft_checked would keep: not an end of sequence, allowed by the grammar
         # after x, inside the budget, and not in the back-off (else the draft-less rule samples x's successor and the
         # draft's slot is a hole)
@@ -1588,7 +1605,7 @@ class HybridBatchEngine(BatchEngine):
             allowed, cover, tlen, offs = self._tab
             valid = valid & allowed[g[0], d0] & (tlen[d0] >= cover[g[0]])
         key = None
-        if seeded:  # the key index is the pass's, assigned at launch (a discarded pass gives it back: _stream_end)
+        if seeded:  # the key index is the pass's, assigned at launch (a discarded pass gives it back: _stretch_end)
             key = row_key(r.seed, r.draws)
             r.draws += 1
         for c in fa:
@@ -1603,10 +1620,8 @@ class HybridBatchEngine(BatchEngine):
         ts = [(c.token_states, c.token_conv) for c in rec]
         for c in rec:
             c.token_states = c.token_conv = None
-        self.counters["steps"] += 1
-        self.counters["rows"] += 1
-        self.counters["solo_steps"] = self.counters.get("solo_steps", 0) + 1
-        self.counters["stream_passes"] = self.counters.get("stream_passes", 0) + 1
+        self._solo_counted()
+        self.counters["stretch_passes"] = self.counters.get("stretch_passes", 0) + 1
         self._growth_trim(1, 64)
         logits = head_logits(self.lm, h)[0]  # x's successor, then the draft's
         lg = self._solo_masked(r, logits, g, [d], left=r.max_tokens - n_out) if constrained else logits
@@ -1635,7 +1650,7 @@ class HybridBatchEngine(BatchEngine):
             kept = valid & keep
             first = mx.where(valid, mx.where(keep, d0, c_rest), plain.astype(mx.int32))
             x_next = mx.where(kept, c_bonus, first)
-        k_i, n_after, miss2, resume2, pos2, flags, rb = _stream_book(kept, valid, keep, backoff, first, x_next, n_out, miss,
+        k_i, n_after, miss2, resume2, pos2, flags, rb = _stretch_book(kept, valid, keep, backoff, first, x_next, n_out, miss,
                                                                       resume, pos, mx.array(self.mtp_backoff))
         if rec:  # the recurrent state after the kept tokens (the rewind, on the device)
             conv_idx = mx.arange(rec[0].cache[0].shape[1]) + 1 + k_i
@@ -1654,11 +1669,11 @@ class HybridBatchEngine(BatchEngine):
                       [a for c in rec for a in c.cache], [a for c in fa for a in (c.keys, c.values)])
         return {"next": nxt, "rb": rb, "h": h, "ts": ts, "keyed": key is not None, "slot": slot, "sel": sel, "pos": pos, "g": g}
 
-    def _stream_commit(self, ctx, cur, dead, holes: List[int]):
+    def _stretch_commit(self, ctx, cur, dead, holes: List[int]):
         """Read pass ``cur`` and commit its picks (one pass behind the GPU). None: the stretch goes on; else how it
         ends: ("done",), or ("span", x, g, refill): the next token and its state, with ``r.pend`` holding the rest of
         a forced span (``refill``: the span follows the kept draft, whose entry slot was written for another token)."""
-        r, fa, rec, entry, constrained, t_r, eos, seeded, own = ctx
+        r, constrained = ctx.r, ctx.constrained
         first, kept, x_next, valid, backoff, n_after, miss, resume = cur["rb"].tolist()
         r.solo_miss, r.solo_resume = miss, resume
         n0 = len(r.out)
@@ -1703,18 +1718,18 @@ class HybridBatchEngine(BatchEngine):
             g = self._advance([r], mx.array([nxt], dtype=mx.int32), g)
         return ("span", nxt, g, after_draft)
 
-    def _stream_end(self, ctx, cur, end, nxt, holes: List[int], base: int):
+    def _stretch_end(self, ctx, cur, end, nxt, holes: List[int], base: int):
         """The stretch's end after pass ``cur`` was read: the pass ``nxt`` launched meanwhile (if any) is discarded, the
         recurrent state goes back to after ``cur``'s kept tokens, the entry's last slots are put right, and the holes
         are compacted away. Returns (the next token or None, its constraint state)."""
-        r, fa, rec, entry, constrained, t_r, eos, seeded, own = ctx
+        r, fa, rec, entry = ctx.r, ctx.fa, ctx.rec, ctx.entry
         if nxt is not None:  # launched on a token that should not have been fed: nothing of it is kept
             for c in fa:
                 c.trim(2)
             entry.trim(2)
             if nxt["keyed"]:
                 r.draws -= 1  # (its key index goes to the pass that replaces it)
-            self.counters["stream_discarded"] = self.counters.get("stream_discarded", 0) + 1
+            self.counters["stretch_discarded"] = self.counters.get("stretch_discarded", 0) + 1
         for c, (t, conv) in zip(rec, cur["ts"]):
             _gdn_at(c, t, conv, 1 + cur["kept"])
         x1, g1 = None, None
@@ -1729,7 +1744,7 @@ class HybridBatchEngine(BatchEngine):
                                           mx.ones((1, 1), dtype=mx.bool_), offset=cur["pos"] + 1)
             else:
                 r.mtp_out = cur["sel"]
-        self._stream_compact(fa + [entry], holes, base)
+        self._stretch_compact(fa + [entry], holes, base)
         if end is not None and end[0] == "done":  # (as _solo: nothing drafts from a finished row's last positions)
             w = _write_at(entry)
             entry.keys[..., w - 1 - cur["kept"]:w, -1] = 0
@@ -1741,11 +1756,12 @@ class HybridBatchEngine(BatchEngine):
         return x1, g1
 
     @staticmethod
-    def _stream_compact(layers, holes: List[int], base: int) -> None:
+    def _stretch_compact(layers, holes: List[int], base: int) -> None:
         """Move the real slots written since ``base`` down over the holes, in every attention layer and the entry: the
         offsets count stored slots again, as everything after the stretch expects."""
         n = _write_at(layers[0])
-        keep = [i for i in range(base, n) if i not in set(holes)]
+        gone = set(holes)
+        keep = [i for i in range(base, n) if i not in gone]
         drop = n - base - len(keep)
         if not drop:
             return
@@ -2628,10 +2644,10 @@ class HybridBatchEngine(BatchEngine):
                     g = mx.array([self._gstate(r) for r in rows], dtype=mx.int32)
                 if len(rows) == 1 and not queue and not filling and self._solo_ok(rows[0], cache) and self._solo_unpadded(cache):
                     got, x1, g1 = self._solo(rows[0], cache, xs[0], g, temp, arrive, dead)
+                    queue += got  # (a stretch can end with arrivals and the row's stop read in the same pass)
                     if x1 is None:  # done: it is retired at the next boundary
                         cur = None
                         continue
-                    queue += got
                     xs, g = [x1], g1
                 free = not any(isinstance(r.controller, LocalsController) or type(r.controller).__name__ == "WalkController" for r in rows)
                 # A row's next committed sample follows exactly the tokens it has

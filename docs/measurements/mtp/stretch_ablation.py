@@ -1,6 +1,6 @@
 """Issue #37: mx.async_eval per pass of the pipelined loop with parts of the pass replaced by cheaper stand-ins (timing
 only: the replies are wrong then): the recurrent layers' state selection, their per-token states, the MTP layer's fill.
-Run from the repo root: HF_HOME=... LOCALS_DISK_CACHE=0 .venv/bin/python docs/measurements/mtp/stream_ablation.py <model> <mtp file>
+Run from the repo root: HF_HOME=... LOCALS_DISK_CACHE=0 .venv/bin/python docs/measurements/mtp/stretch_ablation.py <model> <mtp file>
 """
 import sys, time, mlx.core as mx
 sys.path.insert(0, "tests")
@@ -33,20 +33,10 @@ print("plain          ", run(False))
 print("stream         ", run(True))
 # ablation 1: no device GDN select (states kept as the kernel left them: after both tokens)
 o = hb._gdn_at
-hb._gdn_at = lambda c, ts, conv, keep: None
+hb._gdn_at = lambda c, ts, conv, keep, conv_idx=None: None
 print("no gdn select  ", run(True))
 hb._gdn_at = o
 # ablation 2: no per-token states recorded (want_states off): the kernel's plain path
-o_launch = HybridBatchEngine._stream_launch
-class NoStates:
-    pass
-def launch(self, ctx, cache, st_, slot):
-    r, fa, rec, entry, *_ = ctx
-    for c in rec: c.want_states = False
-    o_model = self.lm.model.__call__
-    out = o_launch(self, ctx, cache, st_, slot)
-    return out
-import types
 orig_mix = type(rt.model.language_model.model.layers[0].linear_attn if hasattr(rt.model, "language_model") else rt.model.model.layers[0].linear_attn)._mix
 def mix_nostates(self, proj, mask=None, cache=None):
     if cache is not None:

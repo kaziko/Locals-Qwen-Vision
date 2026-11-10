@@ -110,11 +110,18 @@ for one seed today as well, with the same distribution.
 
 ## Outcome (issue #37, 2026-11-10)
 
-Built as `_solo_stream` in `locals/hybrid_batch.py`, measured in `docs/measurements/mtp/README.md` ("Issue #37"): the
+Built as `_solo_stretch` in `locals/hybrid_batch.py`, measured in `docs/measurements/mtp/README.md` ("Issue #37"): the
 decode sweep at 1 request runs at 1.14x of MTP off with the back-off after rejected drafts as designed above, and at
 1.28x with it off (`LOCALS_MTP_BACKOFF=0`). The back-off was carried over from the loop that reads every pass, where a
 draft pass cost the pipelining; here a pass without a draft costs what a pass with one costs, so it only loses the
 draft's tokens. Which setting is the default is open (the owner's call); both keep the seeded regression test, each
-against the other loop at the same setting. The estimate of 1.35x assumed a pass at 1.17x of a step; measured, a pass
+against the other loop at the same setting. Two departures from the design above, made in the build and open to the
+owner's veto: a forced span discards the whole pass launched after it (the design kept that pass's first slot and made
+only the draft's a hole), one pass per span and simpler bookkeeping, with the agents bench unmoved; and prompt-lookup
+drafts are not consulted inside a stretch (they need the CPU), only at the boundary before one. The seeded regression
+test holds token for token on the tiny float32 model of `tests/test_mtp.py`; on the real float16 model the two loops
+drift apart in most seeded runs (a 2-token pass rounds differently from the 1-token step the other loop runs in its
+back-off, the effect `greedy_check.py` shows for greedy), so the real-model proof is the greedy one and the sampled
+distribution, not the tokens. The estimate of 1.35x assumed a pass at 1.17x of a step; measured, a pass
 costs the GPU about 11 ms against 7.6 for a step (the 2-token pass 9.4, the per-token states up to 0.6, the MTP layer
 and its draft through the output head 1.6), and both loops are bound by the GPU, not by the CPU reads this record removed.

@@ -47,7 +47,7 @@ def _concat_quantized(mods) -> nn.QuantizedLinear:
 
 def _rope_offset(cache):
     """The position the layer's new tokens are rotated at: the cache's offset, or the logical position a solo stretch
-    with holes keeps on it (``rope_offset``, a device value; hybrid_batch._solo_stream, docs/adr/0002)."""
+    with holes keeps on it (``rope_offset``, a device value; hybrid_batch._solo_stretch, docs/adr/0002)."""
     off = getattr(cache, "rope_offset", None)
     return cache.offset if off is None else off
 

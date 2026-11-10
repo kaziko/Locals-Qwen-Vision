@@ -1,5 +1,6 @@
 """Encode time (mx.async_eval returns) and GPU time (mx.eval returns after it) of a bare 1-token step and a bare
-2-token pass through the model body, on a one-row batch cache, with and without the recurrent per-token states.Run from the repo root: .venv/bin/python docs/measurements/mtp/pass_cost.py <model>
+2-token pass through the model body, on a one-row batch cache, with and without the recurrent per-token states.
+Run from the repo root: .venv/bin/python docs/measurements/mtp/pass_cost.py <model>
 """
 import sys, time, statistics as st, mlx.core as mx
 from locals.runtime import Runtime

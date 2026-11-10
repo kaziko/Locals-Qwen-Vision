@@ -1,5 +1,6 @@
 """Issue #37: the same seeded sampled request through the loop that reads every pass (eng.mtp_pipelined=False) and the
-pipelined one, on the real model, in process; and greedy MTP off against the pipelined loop. Prints the first difference.Run from the repo root: .venv/bin/python docs/measurements/mtp/seeded_check.py <model> <mtp file>
+pipelined one, on the real model, in process; and greedy MTP off against the pipelined loop. Prints the first difference.
+Run from the repo root: .venv/bin/python docs/measurements/mtp/seeded_check.py <model> <mtp file>
 """
 import sys, time, mlx.core as mx
 sys.path.insert(0, "tests")
@@ -29,7 +30,7 @@ for name, text, tools in PROMPTS[:10]:
     off, _, t_off = run(p, False, True)
     new, c, t_new = run(p, True, True)
     old, c_old, t_old = run(p, True, False)
-    print(f"{name:14s} greedy: off/new first diff {diff(off, new)} ({len(off)} tok) old/new {diff(old, new)} | mtp {c.get('draft_mtp_accepted',0)}/{c.get('draft_mtp_tokens',0)} passes {c.get('stream_passes',0)} discarded {c.get('stream_discarded',0)} | tok/s off {len(off)/t_off:.0f} old {len(old)/t_old:.0f} new {len(new)/t_new:.0f}", flush=True)
+    print(f"{name:14s} greedy: off/new first diff {diff(off, new)} ({len(off)} tok) old/new {diff(old, new)} | mtp {c.get('draft_mtp_accepted',0)}/{c.get('draft_mtp_tokens',0)} passes {c.get('stretch_passes',0)} discarded {c.get('stretch_discarded',0)} | tok/s off {len(off)/t_off:.0f} old {len(old)/t_old:.0f} new {len(new)/t_new:.0f}", flush=True)
     for seed in (1, 2):
         kw = {"temp": 0.7, "seed": seed}
         old, _, _ = run(p, True, False, **kw)

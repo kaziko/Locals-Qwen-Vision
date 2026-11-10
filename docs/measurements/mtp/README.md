@@ -146,7 +146,7 @@ Drafts over each whole run (warm-ups included), from `results/step4/<label>_stat
 
 ## Issue #37: the pipelined loop, one draft
 
-The build of `docs/adr/0002-pipelined-draft-loop.md` (`_solo_stream` in `locals/hybrid_batch.py`): with 1 draft a
+The build of `docs/adr/0002-pipelined-draft-loop.md` (`_solo_stretch` in `locals/hybrid_batch.py`): with 1 draft a
 pass, a pass is launched before the last one is read. Same M2 Max (30-core GPU, 32 GB), mlx 0.32.3, mlx-lm 0.32.0,
 Zwyrol (from a Hugging Face cache on another disk, `HF_HOME`), `step4.sh` as above with the labels below, the tuning
 file read from a copy (`LOCALS_TUNE_CACHE`), 2026-11-10. Other programs ran on this Mac meanwhile (a 3D scene app,
@@ -157,8 +157,10 @@ with the unchanged server (MTP off) run twice as the noise floor:
 - `post37-*`: the first build of this change (build `581d32502c07`), which selected each recurrent layer's state
   with `where` and ran its bookkeeping as some thirty small ops; the whole Mac was slower in that session (MTP off at
   104 to 106 tok/s against 110 to 114 in the other two).
-- `post37b-*`: the build committed with this section (`locals/` as in the commit that adds it; build `01c09b7ead35`),
-  with the state selected by two gathers a layer and the bookkeeping compiled (`_stream_book`): MTP off, then the
+- `post37b-*`: the build committed with this section (build `01c09b7ead35`; the setup files say `1d8d629+changes`:
+  the working tree, whose `locals/` the commit then took as it was, apart from renames made after the runs that change
+  no behaviour; the build id hashes file times too, so it cannot be recomputed from the commit),
+  with the state selected by two gathers a layer and the bookkeeping compiled (`_stretch_book`): MTP off, then the
   pipelined loop with the back-off after rejected drafts (the ADR's design, `LOCALS_MTP_BACKOFF=1`, the default), then
   without it (`LOCALS_MTP_BACKOFF=0`), in that order twice.
 
@@ -175,8 +177,10 @@ Each round on its own line (`results/step4/<label>_sweep.txt` and `_agents.txt`)
 | Committed build, pipelined, back-off off (`post37b-nb-a`, `-b`) | 144.2, 143.7; 142.8, 141.7 tok/s | 53, 52; 52, 52 tok/s |
 
 Against the MTP-off runs of its own session (109.6 to 113.7 tok/s, a 4 tok/s spread), the pipelined loop is 1.14x with
-the back-off (126.0 to 129.3) and 1.28x without it (141.7 to 144.2); the estimate in #29 was about 1.35x, the loop that
-reads every pass 0.98x (step 4 above) and 1.03x here. The agents bench does not move: its reply is 41 tokens with 11
+the back-off (126.0 to 129.3) and 1.28x without it (141.7 to 144.2), the medians' ratios; the estimate in #29 was about
+1.35x, the loop that reads every pass 0.98x (step 4 above) and 1.03x here. That loop's two rounds in `pre37-on1`, 119.1
+and 109.9, are 9 tok/s apart, more than any other run's (at most 1.6) and more than the floor; the cause was not looked
+for (a one-off, in the first run of the session, with the same reply each round). The agents bench does not move: its reply is 41 tokens with 11
 forced, and each forced span ends a stretch (one pass discarded, the pipeline drained).
 
 Drafts over each whole run (warm-ups included), from `results/step4/<label>_stats.json`:
@@ -196,40 +200,46 @@ one more each time: the main loop reads a step while the next runs, so it commit
 the boundary that brings the row back to `_solo` (the pipelined loop matches that, so the seeded regression test holds
 token for token). In the pipelined loop every pass feeds two tokens whether it uses the draft or not, so a back-off
 pass costs what a draft pass costs and commits one token for sure instead of 1.85 on average: 519 passes for the same
-tokens as 467 without the back-off. The back-off stays the default here, as the ADR has it; `LOCALS_MTP_BACKOFF=0`
-turns it off in both loops.
+tokens as 467 without the back-off. The back-off is on by default in this commit, as the ADR designed it; which
+setting should be the default is the owner's call (ADR 0002, "Outcome"); `LOCALS_MTP_BACKOFF=0` turns it off in both
+loops. The counters were renamed after these runs: their `_stats.json` files say `stream_passes` and
+`stream_discarded` for what the engine now reports as `stretch_passes` and `stretch_discarded`.
 
-**Where a pass's time goes** (`stream_profile.py`, `stream_ablation.py` and `pass_cost.py`, in process, greedy, the
-`code` prompt of `tests/test_mtp_model.py`, back-off on). On the committed build (`results/stream37/stream_profile.txt`,
+**Where a pass's time goes** (`stretch_profile.py`, `stretch_ablation.py` and `pass_cost.py`, in process, greedy, the
+`code` prompt of `tests/test_mtp_model.py`, back-off on). On the committed build (`results/stretch37/stretch_profile.txt`,
 `pass_cost.txt`): a pass of the pipelined loop spends 2.5 ms building its graph (Python), then 9.8 ms in
 `mx.async_eval`, then 0.00 ms waiting for the pass before it (12.6 ms a pass in all, 119 tok/s there); a plain step
 2.2 and 6.5 ms (104 tok/s). `mx.async_eval` does not return while the pass before is still running on the GPU: with
 nothing in flight (`pass_cost.py`: one pass, then `mx.eval`) it encodes a 1-token step in 1.4 to 1.5 ms, after which the
 GPU takes 7.6 to 7.7 ms, and a 2-token pass in 1.4 ms with 9.4 ms of GPU (9.0 to 10.0 with the recurrent layers'
-per-token states recorded). So both loops are bound by the GPU, and a pass of the pipelined loop costs it about 11 ms:
-the 2-token pass, the states, the MTP layer and its draft through the output head (1.6 ms, "one guess" above), the
-state gathers, the sampling. The first build's `where` on each of the
+per-token states recorded). So both loops are bound by the GPU, and a pass of the pipelined loop costs it about 11 ms
+(derived, not printed: the 12.6 ms a pass less its 1.4 ms of encoding; or the 2-token pass 9.4, the states up to 0.6 and
+the MTP layer with its draft through the output head 1.6, "one guess" above, which sum to 11.6 before the state gathers
+and the sampling). The first build's `where` on each of the
 24 recurrent layers' states and its thirty small bookkeeping ops took 1.7 ms more of encoding per pass
-(`stream_ablation.py` on the first build, printed in that session: 11.1 ms in `mx.async_eval`, 9.4 ms with the
-selection skipped, 10.65 ms with the MTP layer's fill skipped, the same with the per-token states not recorded), which
-is what the committed build cut.
+(`stretch_ablation.py` on the first build, printed in that session and not kept: 11.1 ms in `mx.async_eval`, 9.4 ms
+with the selection skipped, 10.65 ms with the MTP layer's fill skipped, the same with the per-token states not
+recorded), which is what the committed build cut. On the committed build (`results/stretch37/stretch_ablation.txt`):
+9.70 ms a pass, 9.28 with the selection skipped, 9.25 with the states not recorded, 8.55 with the MTP layer's fill
+skipped (a plain step 5.87).
 
 **Replies.** `greedy_check.py` on the committed build, back-off on (`results/greedy_check_37.txt`): with 1 draft (the
 pipelined loop) 12 of the 14 greedy replies are the same as MTP off's and 2 first differ where the two tokens' logits
 are equal (`en-explain` at token 19, `math` at 15: gap 0.0000); step 4 above had 11 of 14, with gaps up to one float16
 step. Drafts kept 746 of 898 (83.1%). `tests/test_mtp_model.py` (the server, 14 prompts, a cached next turn, two
-requests at once, an image prompt): with the back-off on 40 passed and 1 skipped, with it off 39 passed and 2 skipped (a
-next turn whose turn before differed at a tie, as the test allows).
+requests at once, an image prompt; `results/stretch37/test_mtp_model.txt`): with the back-off on 40 passed and 1
+skipped, with it off 39 passed and 2 skipped (a next turn whose turn before differed at a tie, as the test allows).
 
-`seeded_check.py` (`results/stream37/seeded_real.txt`, the first 10 prompts, 192 tokens, temperature 0.7, seeds 1 and 2,
-in process on the first build, back-off on): the greedy reply of the pipelined loop equals the loop that reads every
-pass's on all 10; a seeded sampled reply equals it on 2 of 20 runs (`en-explain` seed 1, `tool-call` both seeds) and
-first differs between token 21 and 170 on the other 18. On the tiny float32 model of `tests/test_mtp.py` the two loops
+`seeded_check.py` (`results/stretch37/seeded_real.txt`, the first 10 prompts, 192 tokens, temperature 0.7, seeds 1 and 2,
+in process on the committed build, back-off on): the greedy reply of the pipelined loop equals the loop that reads every
+pass's on 9 of 10 (`en-explain` first differs at token 19, where `greedy_check_37.txt` shows the two tokens' logits
+equal); a seeded sampled reply equals it on 3 of 20 runs (`en-explain` seed 1, `tool-call` both seeds) and first differs
+between token 21 and 170 on the other 17. On the tiny float32 model of `tests/test_mtp.py` the two loops
 agree token for token in every case (5 draft patterns, 2 seeds, back-off on and off); on the real model a 2-token pass
 rounds its float16 logits differently from the 1-token step the other loop runs in its back-off (the effect
 `greedy_check` shows for greedy), and a sampled draw near a boundary flips on that.
 
-`edit_workload.py` (`results/stream37/edit_workload.txt`, the repeated-module edit of `tests/test_solo.py`, greedy, 200
-tokens, in process on the first build): MTP off, prompt-lookup drafts 108.7 to 116.8 tok/s (114 of 253 draft tokens
-kept); the loop that reads every pass 94.4 to 96.2; the pipelined loop 119.5 to 120.7 (every one of its 100 drafts kept,
-no lookup drafts inside the stretch). The same tokens in all three.
+`edit_workload.py` (`results/stretch37/edit_workload.txt`, the repeated-module edit of `tests/test_solo.py`, greedy, 200
+tokens, in process on the committed build, three rounds): MTP off, prompt-lookup drafts 113.9 to 117.3 tok/s (114 of
+253 draft tokens kept); the loop that reads every pass 101.2 to 102.5; the pipelined loop 128.3 to 130.0 (every one of
+its 100 drafts kept, no lookup drafts inside the stretch). The same tokens in all three.
