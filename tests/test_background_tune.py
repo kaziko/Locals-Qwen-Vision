@@ -277,15 +277,15 @@ def test_a_seed_file_that_goes_during_the_search_is_passed_over(tmp_path, monkey
     good, gone = tmp_path / f"{stem}.json", tmp_path / f"{stem}_mlx0.0.2.json"
     good.write_text(json.dumps({"__mlx__": "0.0.1", "1024x512x1": ["dense"]}))
     gone.write_text(json.dumps({"__mlx__": "0.0.2", "1024x512x1": ["mlx"]}))
-    isfile = os.path.isfile
+    getmtime = os.path.getmtime
 
-    def isfile_then_renamed(p):
-        seen = isfile(p)
-        if seen and p == str(gone):
+    def getmtime_then_renamed(p):
+        t = getmtime(p)
+        if p == str(gone):
             os.replace(gone, str(gone) + ".bad")  # (the other process, right after this one looked)
-        return seen
+        return t
 
-    monkeypatch.setattr(os.path, "isfile", isfile_then_renamed)
+    monkeypatch.setattr(os.path, "getmtime", getmtime_then_renamed)
     assert kernels._seed()[0] == str(good)
     monkeypatch.setattr(kernels, "_TUNE", None)
     assert kernels._load_tune()["1024x512x1"] == ("dense",)
@@ -350,7 +350,74 @@ def test_a_bad_file_that_cannot_be_set_aside_is_not_seeded_over(tmp_path, monkey
     assert mine.read_text() == '{"1024x512x1": ["fr'
 
 
+def test_a_bad_file_another_process_set_aside_first_is_not_stuck(tmp_path, monkeypatch):
+    """The rename failed because another process had already moved the file to .bad: nothing was stuck, but the
+    load skipped its seed and its save."""
+    import json
+    import os
+
+    stem = _version_dir(tmp_path, monkeypatch)
+    (tmp_path / f"{stem}_mlx0.0.1.json").write_text(json.dumps({"__mlx__": "0.0.1", "1024x512x1": ["dense"]}))
+    mine = tmp_path / f"{stem}_mlx{mx.__version__}.json"
+    mine.write_text('{"1024x512x1": ["fr')
+    replace = os.replace
+
+    def other_first(a, b):
+        if str(b).endswith(".bad"):
+            replace(a, b)  # (the other process)
+            raise FileNotFoundError(a)
+        return replace(a, b)
+
+    monkeypatch.setattr(os, "replace", other_first)
+    assert kernels._load_tune()["1024x512x1"] == ("dense",)
+    assert json.loads(mine.read_text())["1024x512x1"] == ["dense"]
+
+
+def _stuck_bad_file(tmp_path, monkeypatch):
+    import os
+
+    stem = _version_dir(tmp_path, monkeypatch)
+    mine = tmp_path / f"{stem}_mlx{mx.__version__}.json"
+    mine.write_text('{"1024x512x1": ["fr')
+    replace = os.replace
+
+    def no_bad(a, b):
+        if str(b).endswith(".bad"):
+            raise PermissionError(b)
+        return replace(a, b)
+
+    monkeypatch.setattr(os, "replace", no_bad)
+    return mine
+
+
+def test_a_bad_file_that_cannot_be_set_aside_is_not_written_over_by_a_later_save(tmp_path, monkeypatch):
+    """The guard was on the load's save only: the first shape the idle tuner timed saved over the bad file."""
+    import pytest
+
+    mine = _stuck_bad_file(tmp_path, monkeypatch)
+    kernels._load_tune()["2560x4096x8"] = ("mlx",)
+    with pytest.raises(OSError):
+        kernels._save_tune()
+    assert mine.read_text() == '{"1024x512x1": ["fr'
+
+
+def test_crash_markers_stay_while_no_save_can_keep_their_count(tmp_path, monkeypatch):
+    """The load deleted the markers but could not save the count: one crash per start, never the two that pin."""
+    import subprocess
+
+    mine = _stuck_bad_file(tmp_path, monkeypatch)
+    for _ in range(2):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (tmp_path / f"{mine.name}.tuning-{dead.pid}").write_text("2560x4096x8")
+        monkeypatch.setattr(kernels, "_TUNE", None)
+        tune = kernels._load_tune()
+    assert tune["__crashed__"] == {"2560x4096x8": 2} and tune["2560x4096x8"] == ("mlx",)
+    assert len(list(tmp_path.glob("*.tuning-*"))) == 2
+
+
 def test_a_crash_under_the_old_name_and_one_under_this_versions_pin_the_shape(tmp_path, monkeypatch):
+    import os
     import subprocess
 
     _version_dir(tmp_path, monkeypatch)
@@ -358,7 +425,7 @@ def test_a_crash_under_the_old_name_and_one_under_this_versions_pin_the_shape(tm
     for p in dead:
         p.wait()
     (tmp_path / f"{kernels._TUNE_FILE}.tuning-{dead[0].pid}").write_text("2560x4096x8")
-    (tmp_path / f"{kernels._TUNE_PATH.rsplit("/", 1)[1]}.tuning-{dead[1].pid}").write_text("2560x4096x8")
+    (tmp_path / f"{os.path.basename(kernels._TUNE_PATH)}.tuning-{dead[1].pid}").write_text("2560x4096x8")
     tune = kernels._load_tune()
     assert tune["__crashed__"] == {"2560x4096x8": 2} and tune["2560x4096x8"] == ("mlx",)
 
