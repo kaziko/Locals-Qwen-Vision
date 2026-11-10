@@ -582,3 +582,22 @@ def test_a_request_arriving_as_the_stop_is_read_is_still_served(tiny, mtp_file):
     eng.serve(source)
     assert first.out == off.out and first.finish == "length"
     assert second.out == other_off.out and second.finish == "length"
+
+
+def test_the_back_off_is_off_in_the_pipelined_loop_and_on_in_the_other_by_default(tiny, mtp_file):
+    """Decided on issue #37: with ``mtp_backoff`` unset, the pipelined loop drafts after every pass and the loop that
+    reads every pass (2 drafts, or ``mtp_pipelined`` off) keeps its back-off; set, both loops follow it."""
+    from locals.mtp import MTP
+
+    eng = _engine(tiny, MTP.load(tiny, mtp_file))
+    assert eng.mtp_backoff is None and not eng._mtp_backoff_on()
+    eng.mtp_pipelined = False
+    assert eng._mtp_backoff_on()
+    eng2 = _engine(tiny, MTP.load(tiny, mtp_file, drafts=2))
+    assert eng2._mtp_backoff_on()
+    eng2.mtp_backoff = False
+    assert not eng2._mtp_backoff_on()
+    eng.mtp_backoff = True
+    eng.mtp_pipelined = True
+    assert eng._mtp_backoff_on()
+    assert _engine(tiny)._mtp_backoff_on()  # (MTP off: the setting is moot, and reads as the loop that reads every pass)

@@ -681,9 +681,10 @@ class HybridBatchEngine(BatchEngine):
         self.mtp_pipelined = True
         # the back-off after rejected MTP drafts (solo_miss, solo_resume: 1, 2, 4, ... 32 tokens without one). It pays
         # in the loop that reads every pass, where a draft pass costs the pipelining; in the pipelined loop a pass
-        # without a draft costs the same as one with it, so False drafts after every pass there. False applies to the
-        # other loop as well, which is then the reference of the seeded regression test for this setting.
-        self.mtp_backoff = True
+        # without a draft costs the same as one with it (issue #37: 1.14x of MTP off with it, 1.28x without). None: each
+        # loop's own setting (on in the loop that reads every pass, off in the pipelined one); True or False: both
+        # loops, which makes the other loop the reference of the seeded regression test for either setting.
+        self.mtp_backoff = None
         import threading
 
         self._woken = threading.Event()
@@ -1376,9 +1377,15 @@ class HybridBatchEngine(BatchEngine):
         return (self._entry(cache) is not None and r.image is None and getattr(r.controller, "drafts", True)
                 and not (hasattr(r.controller, "step_config") and not constrained) and self._solo_drafts_ok(cache))
 
+    def _mtp_backoff_on(self) -> bool:
+        """Whether rejected MTP drafts are followed by a back-off (``mtp_backoff``; None: not in the pipelined loop)."""
+        if self.mtp_backoff is not None:
+            return self.mtp_backoff
+        return not (self.mtp is not None and self.mtp.drafts == 1 and self.mtp_pipelined)
+
     def _mtp_wants(self, r, cache) -> bool:
         """Whether the only running row would draft with the MTP layer now (not in the back-off after rejections)."""
-        return self._mtp_ok(r, cache) and (not self.mtp_backoff or len(r.out) >= getattr(r, "solo_resume", 0))
+        return self._mtp_ok(r, cache) and (not self._mtp_backoff_on() or len(r.out) >= getattr(r, "solo_resume", 0))
 
     def _mtp_last(self, r, entry, x: int) -> None:
         """The layer's output at the entry's last position, with ``x`` (fed next) as the token after it, from the
@@ -1651,7 +1658,7 @@ class HybridBatchEngine(BatchEngine):
             first = mx.where(valid, mx.where(keep, d0, c_rest), plain.astype(mx.int32))
             x_next = mx.where(kept, c_bonus, first)
         k_i, n_after, miss2, resume2, pos2, flags, rb = _stretch_book(kept, valid, keep, backoff, first, x_next, n_out, miss,
-                                                                      resume, pos, mx.array(self.mtp_backoff))
+                                                                      resume, pos, mx.array(self._mtp_backoff_on()))
         if rec:  # the recurrent state after the kept tokens (the rewind, on the device)
             conv_idx = mx.arange(rec[0].cache[0].shape[1]) + 1 + k_i
             for c, (t, conv) in zip(rec, ts):

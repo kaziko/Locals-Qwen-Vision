@@ -315,9 +315,10 @@ regression test in `tests/test_mtp.py`; `eng.mtp_pipelined = False` runs that lo
 consulted inside a stretch: a row with one at the boundary runs it first, as above, and the stretch starts when it has
 none. `counters` add `stretch_passes`, `stretch_discarded` and `draft_mtp_cut` (passes whose draft was cut to nothing).
 The back-off after rejected drafts paid in the loop that reads every pass, where a draft pass cost the pipelining; in
-the pipelined loop a pass without a draft costs the same as one with it, so `mtp_backoff = False`
-(`LOCALS_MTP_BACKOFF=0`) drafts after every pass, in both loops (a cut draft still waits one pass, as the other loop
-does). `docs/measurements/mtp/README.md` has both settings measured.
+the pipelined loop a pass without a draft costs the same as one with it, so the pipelined loop drafts after every pass
+(a cut draft still waits one pass, as the other loop does); `mtp_backoff` (`LOCALS_MTP_BACKOFF`, `1` or `0`) sets both
+loops the same way, for the seeded regression test. `docs/measurements/mtp/README.md` has both settings measured:
+1.14x of MTP off with the back-off, 1.28x without (the default, decided on issue #37).
 
 ## Retiring rows
 
@@ -447,7 +448,7 @@ Any other exception escapes `serve`, for example a Metal out-of-memory error. `B
 | `LOCALS_GROWTH_TRIM` | `1` | `0` turns off the trim every 32 steps |
 | `LOCALS_SOLO` | `1` | `0`: one token per step for a request alone too (no forced spans in one pass, no drafts) |
 | `LOCALS_MTP`, `LOCALS_MTP_DRAFTS` | unset, 1 | The MTP layer's file, and its drafts per pass (below) |
-| `LOCALS_MTP_BACKOFF` | `1` | `0`: no back-off after rejected MTP drafts (`mtp_backoff`; issue #37 measured both) |
+| `LOCALS_MTP_BACKOFF` | unset | The back-off after rejected MTP drafts in both loops: `1` on, `0` off; unset, each loop's own (`mtp_backoff`; issue #37 measured both) |
 | `LOCALS_MEMLOG`, `LOCALS_MIXLOG`, `LOCALS_PREFILL_LOG` | unset (off) | Logging, described above. Any non-empty value turns them on, `0` included, because the code tests `bool(os.environ.get(...))` |
 | `PREFILL_SCORES`, `PREFILL_TOKENS` | `1 << 24`, 2048 | Module constants in `hybrid_batch.py` (a model's `prefill_scores` and `prefill_chunk_tokens` take precedence) |
 | `memory_limit` | 0 in the engine | Set by `BatchService` as above |

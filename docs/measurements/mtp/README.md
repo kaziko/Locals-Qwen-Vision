@@ -175,6 +175,7 @@ Each round on its own line (`results/step4/<label>_sweep.txt` and `_agents.txt`)
 | Committed build, MTP off (`post37b-off-a`, `-b`) | 113.0, 113.7; 109.6, 111.1 tok/s | 51, 53; 50, 53 tok/s |
 | Committed build, pipelined, back-off on (`post37b-on1-a`, `-b`) | 128.6, 129.3; 126.0, 126.3 tok/s | 51, 51; 50, 51 tok/s |
 | Committed build, pipelined, back-off off (`post37b-nb-a`, `-b`) | 144.2, 143.7; 142.8, 141.7 tok/s | 53, 52; 52, 52 tok/s |
+| The shipped default, no `LOCALS_MTP_BACKOFF` (`post37c-default`, the commit after) | 141.4, 142.6 tok/s | 52, 52 tok/s |
 
 Against the MTP-off runs of its own session (109.6 to 113.7 tok/s, a 4 tok/s spread), the pipelined loop is 1.14x with
 the back-off (126.0 to 129.3) and 1.28x without it (141.7 to 144.2), the medians' ratios; the estimate in #29 was about
@@ -200,9 +201,11 @@ one more each time: the main loop reads a step while the next runs, so it commit
 the boundary that brings the row back to `_solo` (the pipelined loop matches that, so the seeded regression test holds
 token for token). In the pipelined loop every pass feeds two tokens whether it uses the draft or not, so a back-off
 pass costs what a draft pass costs and commits one token for sure instead of 1.85 on average: 519 passes for the same
-tokens as 467 without the back-off. The back-off is on by default in this commit, as the ADR designed it; which
-setting should be the default is the owner's call (ADR 0002, "Outcome"); `LOCALS_MTP_BACKOFF=0` turns it off in both
-loops. The counters were renamed after these runs: their `_stats.json` files say `stream_passes` and
+tokens as 467 without the back-off. The owner decided on #37 (2026-11-10) that the pipelined loop runs without it,
+as the commit after the measured one does (`mtp_backoff` None: each loop's own setting; the loop that reads every pass
+keeps its back-off); `LOCALS_MTP_BACKOFF=1` or `0` sets both loops. `post37c-default` in the table is the server as it
+ships after that decision, run once to check the default: the same counters as `post37b-nb-a` (467 stretch passes, 372
+of 452 drafts kept). A one-second tiny-model test ran on this Mac while that server loaded its model, before its rounds. The counters were renamed after these runs: their `_stats.json` files say `stream_passes` and
 `stream_discarded` for what the engine now reports as `stretch_passes` and `stretch_discarded`.
 
 **Where a pass's time goes** (`stretch_profile.py`, `stretch_ablation.py` and `pass_cost.py`, in process, greedy, the
