@@ -406,14 +406,36 @@ def _oracle_at(tiny, mtp_file, truth, bad):
     return _as_oracle(Oracle, tiny, mtp_file, 1)
 
 
-def _stretch_serve(tiny, mtp, reqs, pipelined, lru=None, backoff=True, **kw):
-    """Serve ``reqs`` with MTP drafts, through the pipelined loop or the one that reads every pass, with or without the
-    back-off after rejected drafts, and no prompt-lookup drafts; ``kw`` go to each Request (a temperature, a seed)."""
+def _stretch_engine(tiny, mtp, pipelined=True, backoff=None):
+    """An engine with MTP drafts, through the pipelined loop or the one that reads every pass, the back-off after
+    rejected drafts as given (None: each loop's default), and no prompt-lookup drafts."""
     eng = _engine(tiny, mtp)
     eng.mtp_pipelined, eng.mtp_backoff = pipelined, backoff
     eng._solo_draft = lambda r, cache: []  # (no prompt-lookup drafts: the tiny model's reply repeats itself)
+    return eng
+
+
+def _stretch_serve(tiny, mtp, reqs, pipelined, lru=None, backoff=True, **kw):
+    """Serve ``reqs`` on a _stretch_engine; ``kw`` go to each Request (a temperature, a seed)."""
+    eng = _stretch_engine(tiny, mtp, pipelined, backoff)
     out = _serve(eng, reqs, lru, **kw)
     return eng, out
+
+
+def _arriving(first, second, after):
+    """A serve source: ``first`` at once, ``second`` once the first wrote ``after`` tokens."""
+    sent = []
+
+    def source(block):
+        if not sent:
+            sent.append(1)
+            return [first]
+        if len(sent) == 1 and len(first.out) >= after:
+            sent.append(1)
+            return [second]
+        return []
+
+    return source
 
 
 PATTERNS = {
@@ -473,21 +495,9 @@ def test_a_request_arriving_during_a_stretch_joins_and_both_replies_are_mtp_off(
         from locals.packed import Request
 
         lru = _lru()
-        eng = _engine(tiny, mtp)
-        eng._solo_draft = lambda r, cache: []
+        eng = _stretch_engine(tiny, mtp)
         first, second = Request(list(LONG), _free(), 40), Request(list(other), _free(), 20)
-        sent = []
-
-        def source(block):
-            if not sent:
-                sent.append(1)
-                return [first]
-            if len(sent) == 1 and len(first.out) >= 12:
-                sent.append(1)
-                return [second]
-            return []
-
-        eng.serve(source, lru=lru)
+        eng.serve(_arriving(first, second, 12), lru=lru)
         return lru, eng, first, second
 
     _, _, f0, s0 = run(None)
@@ -505,9 +515,7 @@ def test_a_turn_continues_from_the_cache_a_stretch_left(tiny, mtp_file):
     starts from its cache and gives MTP off's reply, with and without the pipelined loop."""
     def run(mtp, pipelined):
         lru = _lru()
-        eng = _engine(tiny, mtp)
-        eng.mtp_pipelined = pipelined
-        eng._solo_draft = lambda r, cache: []
+        eng = _stretch_engine(tiny, mtp, pipelined)
         (a,) = _serve(eng, [(LONG, 30)], lru)
         (b,) = _serve(eng, [(LONG + a.out + [77, 78, 79], 24)], lru)
         return a, b
@@ -539,9 +547,7 @@ def test_a_stop_at_a_kept_draft_ends_where_the_loop_that_reads_every_pass_ends(t
 
     def run(mtp, pipelined):
         lru = _lru()
-        eng = _engine(tiny, mtp)
-        eng.mtp_pipelined = pipelined
-        eng._solo_draft = lambda r, cache: []
+        eng = _stretch_engine(tiny, mtp, pipelined)
         r = Request(list(LONG), StopAt(), 40)
         waiting = [r]
         eng.serve(lambda block: [waiting.pop()] if waiting else [], lru=lru)
@@ -565,21 +571,9 @@ def test_a_request_arriving_as_the_stop_is_read_is_still_served(tiny, mtp_file):
 
     (off,) = _serve(_engine(tiny), [(LONG, 40)])
     (other_off,) = _serve(_engine(tiny), [([40, 41, 42, 43, 44, 45, 46, 47, 48], 12)])
-    eng = _engine(tiny, _oracle_at(tiny, mtp_file, off.out, PATTERNS["all kept"]))
-    eng._solo_draft = lambda r, cache: []
+    eng = _stretch_engine(tiny, _oracle_at(tiny, mtp_file, off.out, PATTERNS["all kept"]))
     first, second = Request(list(LONG), _free(), 40), Request([40, 41, 42, 43, 44, 45, 46, 47, 48], _free(), 12)
-    sent = []
-
-    def source(block):
-        if not sent:
-            sent.append(1)
-            return [first]
-        if len(sent) == 1 and len(first.out) >= 38:  # (the pass read next commits tokens 39 and 40: the stop)
-            sent.append(1)
-            return [second]
-        return []
-
-    eng.serve(source)
+    eng.serve(_arriving(first, second, 38))  # (the pass read next commits tokens 39 and 40: the stop)
     assert first.out == off.out and first.finish == "length"
     assert second.out == other_off.out and second.finish == "length"
 

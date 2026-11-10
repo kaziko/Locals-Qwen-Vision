@@ -37,7 +37,8 @@ hb._gdn_at = lambda c, ts, conv, keep, conv_idx=None: None
 print("no gdn select  ", run(True))
 hb._gdn_at = o
 # ablation 2: no per-token states recorded (want_states off): the kernel's plain path
-orig_mix = type(rt.model.language_model.model.layers[0].linear_attn if hasattr(rt.model, "language_model") else rt.model.model.layers[0].linear_attn)._mix
+cls = type(rt.model.language_model.model.layers[0].linear_attn if hasattr(rt.model, "language_model") else rt.model.model.layers[0].linear_attn)
+orig_mix = cls._mix
 def mix_nostates(self, proj, mask=None, cache=None):
     if cache is not None:
         cache.want_states = False
@@ -46,7 +47,6 @@ def mix_nostates(self, proj, mask=None, cache=None):
         cache.token_states = mx.stack([cache.cache[1], cache.cache[1]])
         cache.token_conv = (cache.cache[0], proj[..., :self.conv_dim])
     return out
-cls = type(rt.model.language_model.model.layers[0].linear_attn if hasattr(rt.model, "language_model") else rt.model.model.layers[0].linear_attn)
 cls._mix = mix_nostates
 print("no token states", run(True))
 cls._mix = orig_mix
