@@ -921,11 +921,15 @@ class HybridBatchEngine(BatchEngine):
         """Every 32 steps: the rows' KV grows every step, past what their admission counted, so room for the next
         ``positions`` of each comes out of the prompt cache now, before Metal runs out (which fails every row).
         Called by every kind of step: chained, boundary (all of them while a request waits for memory: the trim
-        never ran then, when memory is tightest) and a lone row's passes."""
+        never ran then, when memory is tightest) and a lone row's passes. LOCALS_GROWTH_TRIM=0 turns off only that
+        room under the GPU limit: the memory-floor check (_pressure_trim) runs every 32 steps all the same (issue #58)."""
         lru = getattr(self, "_serve_lru", None)
-        if lru is not None and _GROWTH_TRIM and self.counters["steps"] >= self._next_trim:
+        if lru is not None and self.counters["steps"] >= self._next_trim:
             self._next_trim = self.counters["steps"] + 32  # (a multiple of 32 can be passed by in a lone row's passes)
-            self._trim_for(lru, n_rows * positions * self._kv_bytes_per_token())
+            if _GROWTH_TRIM:
+                self._trim_for(lru, n_rows * positions * self._kv_bytes_per_token())
+            else:
+                self._pressure_trim(lru)
 
     def _keep_reply(self, r, n: int, cache) -> None:
         _keep_reply_state(r, n, cache)

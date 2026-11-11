@@ -149,7 +149,7 @@ It is called:
 - before each admission (`_make_room`);
 - before each checkpoint copy (`_room_for_copy`);
 - at retire when other rows are running (a lone row's retire runs only the system-memory step, see above);
-- every 32 decode steps for the rows' growth (`LOCALS_GROWTH_TRIM`, on by default).
+- every 32 decode steps for the rows' growth (`LOCALS_GROWTH_TRIM`, on by default). With `LOCALS_GROWTH_TRIM=0`, only the system-memory step runs every 32 steps: the switch does not turn off the memory-floor check (issue #58).
 
 After an engine error such as a Metal out-of-memory error, the service halves the cache (`lru.trim_to(n_bytes=lru.nbytes // 2)`) and serves again.
 
@@ -199,7 +199,7 @@ According to the code's comments, `copy.deepcopy` of a cache does not duplicate 
 | `context_fit()` | `(memory_limit - weights_bytes - (3 << 29)) // kv`, rounded down to a multiple of 1024 | The 1.5 GiB is a prefill's activations. Qwen3.5-4B on a 16 GB Mac: 178,176 tokens (145,408 while the margin was 2.5 GiB). |
 | `max_context` | `--max-context`. Without it, 65,536 is raised to `context_fit()` once the engine loads (`_cap_context`; where less fits, requests are held to the fit while clients are told 65,536), then capped at the model's own context length. | A prompt of `max_context` tokens or more gets `ContextTooLong`. So does one that leaves fewer than `min(max_tokens, 256)` tokens for the reply. The stock `mlx` engine keeps 65,536, because it has no memory guard. |
 | Memory floor | `LOCALS_MEMORY_FLOOR_PCT` (default 20) × physical memory (`hw.memsize`) | The memory the server leaves free for other apps. The 20% is a guess, not a measurement. `0` turns off the system-memory checks. |
-| `cache_bytes` (the start budget) | `service.cache_budget`: `--cache-gb` as it is. Without it, `min(max(free, longest, 1.5 GiB), 16 GiB)`, where `free = limit - active - 5 GiB` and `longest = context_fit() * kv`; with a memory floor, also at most `available - floor` at start (this cap wins over `longest`), but never below 1.5 GiB. | Room for one conversation as long as fits (`longest`), up to the 16 GiB cap, so its follow-up can continue from it. With `--cache-gb`, the budget never goes above it; low system memory can still shrink the cache below it. |
+| `cache_bytes` (the start budget) | `service.cache_budget`: `--cache-gb` as it is. Without it, `min(max(free, longest, 1.5 GiB), 16 GiB)`, where `free = limit - active - 5 GiB` and `longest = context_fit() * kv`. Available system memory and the memory floor do not change it (issue #58): a server that starts in low memory gets its budget capped at the first check of the guard, and the budget grows back to the start budget when memory comes back. | Room for one conversation as long as fits (`longest`), up to the 16 GiB cap, so its follow-up can continue from it. With `--cache-gb`, the budget never goes above it; low system memory can still shrink the cache below it. |
 
 `cache_bytes` is only the cache's start budget; before each check of the guard the budget follows the system's available memory (see "Eviction"), and the hard rule is `memory_limit`. At the automatic context limit, a single request's KV can take all the memory left beside the weights, and the guard empties the prompt cache for it.
 
@@ -209,13 +209,13 @@ According to the code's comments, `copy.deepcopy` of a cache does not duplicate 
 
 | Setting | Default | Effect |
 |---|---|---|
-| `--cache-gb` | Sized from free GPU memory and available system memory | The start budget in GiB. The budget never goes above it; low system memory can still shrink the cache below it. |
+| `--cache-gb` | Sized from free GPU memory | The start budget in GiB. The budget never goes above it; low system memory can still shrink the cache below it. |
 | `LOCALS_MEMORY_FLOOR_PCT` | `20` | The memory floor, in percent of physical memory. `0`: the cache budget no longer follows the system's memory, as before issue #56. A value that is not a number from 0 to under 100 prints a warning and uses 20. |
 | `--max-context` | What fits, at least 65,536, and at most the model's own context length | Prompt plus reply tokens per request. |
 | `LOCALS_REPLY_CHECKPOINT` | `1` | `0`: no reply checkpoints. |
 | `LOCALS_KEEP_THINK` | `1` | `0`: Qwen3.5's template as it is, earlier replies without their empty think block (see "The reply checkpoint"). |
 | `LOCALS_DISK_CACHE`, `LOCALS_DISK_CACHE_DIR`, `LOCALS_DISK_CACHE_GB` | `1`, `~/.cache/locals/prompts`, `4` | See "Disk cache of system prompts". |
-| `LOCALS_GROWTH_TRIM` | `1` | `0`: no trimming every 32 steps for decode growth. |
+| `LOCALS_GROWTH_TRIM` | `1` | `0`: no trimming every 32 steps for decode growth. The memory-floor check still runs every 32 steps. |
 | `LOCALS_MAX_SNAPSHOTS` | `4` | Number of shared-prefix snapshots kept. |
 | `LOCALS_MEMLOG` | unset | Any non-empty value turns it on, even `0`. Prints GPU memory before and after each admission, at every `_trim_for` call (not only the calls that trim), and when KV buffers are reserved. |
 | `LOCALS_PREFILL_LOG` | unset | Prints a `[prefill] ...` line for each batch prefill, and `[checkpoint] kind at n (disk on/off)` at each `system` or `user` checkpoint position, also when `_room_for_copy` skipped the copy. |

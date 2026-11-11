@@ -70,7 +70,7 @@ The `type=model_id` converter in `locals/defaults.py` resolves names as follows:
 - An existing local path (a folder or a file, with `~` expanded) becomes its absolute path. Links are kept, not resolved., because the background server runs from another directory and later commands may run from other folders. A short name takes precedence over a folder with the same name.
 - Anything else passes through unchanged as a Hugging Face id.
 
-`DEFAULT_MODEL` is `default_model()`. It picks Qwen3.5-2B when the Mac reports between 0 and 12 GB of memory (`sysctl hw.memsize`), and Qwen3.5-4B otherwise.
+`DEFAULT_MODEL` is `default_model()`. It picks Qwen3.5-2B when the Mac reports between 0 and 12 GB of memory (`hw.memsize`, read in-process by `sysmem.physical_bytes`), and Qwen3.5-4B otherwise.
 
 `short_name(model)` is the model's name in the API. It is the last path component, lower-cased, with a trailing `-4bit` or `-mlx-4bit` removed. The server routes on the model id of a request:
 
@@ -558,7 +558,7 @@ Variables read by the server process must be set in the environment of the comma
 | `LOCALS_COMPILED_GB` | `1.5` | Limit, in units of 1e9 bytes, on the tables of kept compiled constraints. | `runtime.Runtime._cput` |
 | `LOCALS_MIX_CHUNK` | `1024` | Prompt tokens per mixed prefill and decode pass. `0` prefills a new prompt while the other rows wait. | `hybrid_batch.HybridBatchEngine.__init__` |
 | `LOCALS_MAX_SNAPSHOTS` | `4` | Shared-prefix snapshots kept (at least 1). | `hybrid_batch.HybridBatchEngine.__init__` |
-| `LOCALS_GROWTH_TRIM` | `1` | `0` turns off making room in the prompt cache every 32 decode steps for the rows' KV growth. | `hybrid_batch.py` |
+| `LOCALS_GROWTH_TRIM` | `1` | `0` turns off making room in the prompt cache every 32 decode steps for the rows' KV growth. It does not turn off the memory-floor check, which still runs every 32 steps (`LOCALS_MEMORY_FLOOR_PCT`). | `hybrid_batch.py` |
 | `LOCALS_MEMLOG` | unset | Prints GPU memory around each admission. | `hybrid_batch.py` |
 | `LOCALS_MIXLOG` | unset | Prints each mixed pass. | `hybrid_batch.py` |
 | `LOCALS_PREFILL_LOG` | unset | Prints prefill and checkpoint lines. | `hybrid_batch.HybridBatchEngine._prefill_batch`, `hybrid_batch.HybridBatchEngine._at_checkpoint` |

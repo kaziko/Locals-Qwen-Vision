@@ -77,13 +77,11 @@ def chip() -> str:
 
 
 def memory_gb() -> float:
-    """The Mac's memory in GB (0 if it cannot be read)."""
-    import subprocess
+    """The Mac's memory in GB (0 if it cannot be read): sysmem's one read of ``hw.memsize``."""
+    from . import sysmem
 
-    try:
-        return int(subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5).stdout) / 2**30
-    except Exception:  # noqa: BLE001
-        return 0.0
+    total = sysmem.physical_bytes()
+    return total / 2**30 if total else 0.0
 
 
 # GPU memory a model needs next to its weights: the KV cache of a few agents' prompts, the prefill and

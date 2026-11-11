@@ -726,3 +726,20 @@ def test_this_macs_memory_is_read_without_usr_sbin_on_the_path(monkeypatch):
 
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     assert defaults.memory_gb() > 1
+
+
+def test_this_macs_memory_comes_from_the_one_physical_memory_read(monkeypatch):
+    """Issue #58: memory_gb() is sysmem.physical_bytes() in GiB (one in-process read, cached), and 0.0 when that
+    cannot be read; no sysctl subprocess of its own."""
+    import subprocess
+
+    from locals import defaults, sysmem
+
+    def no_subprocess(*a, **k):
+        raise AssertionError("memory_gb ran a subprocess")
+
+    monkeypatch.setattr(subprocess, "run", no_subprocess)
+    monkeypatch.setattr(sysmem, "physical_bytes", lambda: 24 << 30)
+    assert defaults.memory_gb() == 24.0
+    monkeypatch.setattr(sysmem, "physical_bytes", lambda: None)
+    assert defaults.memory_gb() == 0.0
