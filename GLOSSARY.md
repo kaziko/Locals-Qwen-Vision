@@ -12,6 +12,18 @@ _Avoid_: vision prompt, embedded prompt, image request
 The token sequence a prompt is stored under in the prompt cache. For a text prompt it is the prompt itself; for an image prompt, each image's tokens are replaced by that image's identity, so two different images never share an entry. An image prompt with an image of unknown identity has no cache key and is not cached.
 _Avoid_: lookup tokens, key tokens
 
+**Cache budget**:
+The most memory the prompt cache may hold right now. It starts from what the Mac has free, shrinks when other apps need memory, grows back when they let it go, and never passes the size the user set. When less than the memory floor is free, it can be zero.
+_Avoid_: cache size, cache limit, cache cap
+
+**Start budget**:
+The cache budget the server starts with: the size the user set, or else what the Mac has free at start. The cache budget never goes above it.
+_Avoid_: initial size, max cache
+
+**Memory floor**:
+The share of the Mac's memory the server leaves free for other apps. When less than that is free, the prompt cache gives memory back.
+_Avoid_: memory margin, reserve, headroom
+
 **Draft**:
 Tokens proposed ahead of the model and checked in the same pass as the next token. Only the tokens the model would have chosen itself are kept, so a draft never changes a reply.
 _Avoid_: speculation, guess tokens

@@ -189,6 +189,23 @@ def memory_plan(limit: int, weights: int) -> tuple:
     return pool, (int(float(env) * (1 << 30)) if env else pool + (512 << 20))
 
 
+MIN_CACHE_BYTES = int(1.5 * (1 << 30))  # the smallest prompt-cache budget (both engines)
+
+
+def cache_budget(limit: int, active: int, longest: int, cache_bytes: Optional[int] = None,
+                 available: Optional[int] = None, floor: int = 0) -> int:
+    """The prompt cache's start budget (GLOSSARY.md "Cache budget"). ``cache_bytes`` (--cache-gb) is used as it is.
+    Else what the GPU limit leaves after the weights (``active``) and 5 GB for running rows and prefill, at least one
+    conversation as long as fits (``longest``: its follow-up question then continues from it, 1.5 s instead of 137 s
+    at 60k tokens), 1.5 GiB to 16 GiB, and with a memory ``floor`` at most ``available - floor`` (issue #56)."""
+    if cache_bytes:
+        return int(cache_bytes)
+    budget = min(max(limit - active - (5 << 30), longest, MIN_CACHE_BYTES), 16 << 30)
+    if floor and available is not None:
+        budget = max(min(budget, available - floor), MIN_CACHE_BYTES)
+    return int(budget)
+
+
 _SERVICES: "weakref.WeakSet" = weakref.WeakSet()  # the engines of this process (locals bench serves two at once)
 _POOL_PLANNED = False  # our engine sized MLX's pool of freed buffers (memory_plan): the stock engine keeps it
 
@@ -375,6 +392,14 @@ class BatchService:
                                                for k, v in lru.stats_by_type().items()}
             except Exception:  # noqa: BLE001
                 pass
+            if eng is not None:  # our engine (the stock engine sets no _eng): the budget follows system memory
+                from . import sysmem
+
+                avail, total = eng.read_available(), sysmem.physical_bytes()
+                out["prompt_cache_budget_mb"] = lru.max_bytes / 1e6
+                out["prompt_cache_start_mb"] = eng.start_budget / 1e6
+                out["memory_available_pct"] = round(avail * 100 / total) if avail is not None and total else None
+                out.setdefault("pressure_trims", 0)
         return out
 
     # -- worker -----------------------------------------------------------------------
@@ -723,12 +748,16 @@ class BatchService:
         _POOL_PLANNED = True
         mx.set_cache_limit(pool)
         eng.memory_limit = limit - margin
-        if self.cache_bytes is None:  # what is left after the weights and 5 GB for running rows and prefill,
-            free = limit - mx.get_active_memory() - (5 << 30)  # and at least one conversation as long as fits
-            # (its follow-up question then continues from it: 1.5 s instead of 137 s at 60k tokens). The memory
-            # guard empties the prompt cache for running rows as they need it.
-            longest = (self.context_fit() or 0) * eng._kv_bytes_per_token()
-            self.cache_bytes = int(min(max(free, longest, 1.5 * (1 << 30)), 16 << 30))
+        from . import sysmem
+
+        # the memory the server leaves free for other apps (issue #56): the prompt cache's budget follows the
+        # memory macOS has available, at start and at each check of the memory guard; LOCALS_MEMORY_FLOOR_PCT=0: off
+        floor = sysmem.floor_bytes()
+        active = mx.get_active_memory()  # (read before context_fit, as before issue #56)
+        longest = (self.context_fit() or 0) * eng._kv_bytes_per_token()
+        self.cache_bytes = cache_budget(limit, active, longest, self.cache_bytes,
+                                        available=eng.read_available() if floor else None, floor=floor)
+        eng.memory_floor, eng.start_budget = floor, self.cache_bytes
         lru = chain_cache(max_size=256, max_bytes=self.cache_bytes)
         self._lru = lru
         owner = self._owner = {}
@@ -1114,7 +1143,7 @@ class BatchService:
                                   prefill_batch_size=min(self.slots, 4), prefill_step_size=512)
 
         gen = new_gen()
-        lru = LRUPromptCache(max_size=256, max_bytes=self.cache_bytes or int(1.5 * (1 << 30)))
+        lru = LRUPromptCache(max_size=256, max_bytes=self.cache_bytes or MIN_CACHE_BYTES)
         self._lru = lru
         sampler = make_sampler(self.temp, top_p=self.top_p, top_k=self.top_k)
         live = {}

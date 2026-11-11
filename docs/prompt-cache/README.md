@@ -105,7 +105,7 @@ thinking off there is no reasoning to keep.
 | Follow-up question on a 138k-token document | 8 minutes | 2.4 s |
 | Prompts cached, four multi-turn conversations | 28% | 83% |
 
-`LOCALS_REPLY_CHECKPOINT=0` turns it off. The automatic cache budget is at least `context_fit() * kv` (one conversation as long as fits) but never more than 16 GiB, so that a follow-up can continue from it (see "Memory sizing").
+`LOCALS_REPLY_CHECKPOINT=0` turns it off. The automatic cache budget is at least `context_fit() * kv` (one conversation as long as fits) but never more than 16 GiB, so that a follow-up can continue from it, unless the memory macOS has available caps it lower (see "Memory sizing").
 
 ## Eviction
 
@@ -127,7 +127,18 @@ thinking off there is no reasoning to keep.
 
 The docstring gives the reason: with Qwen3.5, every agent step left another copy of the agent's whole history (9k tokens, 290 MB). The cache filled with them, and memory trims emptied it.
 
-**The memory guard.** `_trim_for(lru, need)` acts when active memory plus `need` exceeds `memory_limit`. It escalates in this order:
+**The memory guard.** `_trim_for(lru, need)` first sets the cache budget from the memory macOS has available (`_pressure_trim`, issue #56; GLOSSARY.md "Cache budget", "Memory floor"):
+
+- `budget = min(start budget, lru.nbytes + available bytes - memory floor)`, written to `lru.max_bytes`, so later inserts keep the cache within it. At run time the budget can fall to 0: below the floor, the cache keeps nothing, system prompts included. The 1.5 GiB minimum is for the start budget only.
+- Below the floor, the cheap memory goes first: `gc.collect()` and `mx.clear_cache()` (MLX's pool of freed buffers, which macOS counts as used), then the shared-prefix snapshots. The reading is taken again after each step.
+- If the cache still holds more than the budget: `lru.trim_to(n_bytes=budget)` in the eviction order above, then `mx.clear_cache()`. This counts `pressure_trims`.
+- What a step gave back (the drop in MLX's active and pool memory, and the bytes of the dropped entries) counts as available until a reading shows it (`_seen`). Dropped entries can share their buffers with a running row and free nothing, and the reading may lag. Without this, each check with the same reading cut the same shortfall again, until the cache was empty.
+- A lone row's retire moves its buffers into the prompt cache as they are. The last reading counted them as used memory, so the budget is set again with the entry's bytes added (`_pressure_trim(lru, adding=...)`). Without this, the insert could push out older entries, or the new entry itself.
+- The budget never goes above the start budget. When memory comes back, the same rule raises it again; there is no separate grow-back step.
+- Available bytes are `kern.memorystatus_level` (the percent of memory macOS counts as available) times physical memory, read through `sysctlbyname` at every call (`locals/sysmem.py`; one `available_bytes()` took 1.96 µs on a 32 GB Mac, project venv, 10,000 calls). A read that fails changes nothing: no trim and no growth.
+- `LOCALS_MEMORY_FLOOR_PCT=0` turns this step off. The step also runs when `memory_limit` is 0 (no GPU guard).
+
+Then it acts when active memory plus `need` exceeds `memory_limit`. It escalates in this order:
 
 1. `gc.collect()` and `mx.clear_cache()`.
 2. Clear the shared-prefix snapshots.
@@ -137,7 +148,7 @@ It is called:
 
 - before each admission (`_make_room`);
 - before each checkpoint copy (`_room_for_copy`);
-- at retire when other rows are running;
+- at retire when other rows are running (a lone row's retire runs only the system-memory step, see above);
 - every 32 decode steps for the rows' growth (`LOCALS_GROWTH_TRIM`, on by default).
 
 After an engine error such as a Metal out-of-memory error, the service halves the cache (`lru.trim_to(n_bytes=lru.nbytes // 2)`) and serves again.
@@ -187,9 +198,10 @@ According to the code's comments, `copy.deepcopy` of a cache does not duplicate 
 | KV bytes per token | `_kv_bytes_per_token()` | (number of `KVCache` layers) × (2 × KV heads × `head_dim`, raised to the widest `k_proj` + `v_proj` output) × 2 bytes. The widest-projection rule exists because Gemma 4's full-attention layers have 512-wide heads where the config says 256. Recurrent state has a fixed size and is not counted. Qwen3.5-4B: 32 KB per token. |
 | `context_fit()` | `(memory_limit - weights_bytes - (3 << 29)) // kv`, rounded down to a multiple of 1024 | The 1.5 GiB is a prefill's activations. Qwen3.5-4B on a 16 GB Mac: 178,176 tokens (145,408 while the margin was 2.5 GiB). |
 | `max_context` | `--max-context`. Without it, 65,536 is raised to `context_fit()` once the engine loads (`_cap_context`; where less fits, requests are held to the fit while clients are told 65,536), then capped at the model's own context length. | A prompt of `max_context` tokens or more gets `ContextTooLong`. So does one that leaves fewer than `min(max_tokens, 256)` tokens for the reply. The stock `mlx` engine keeps 65,536, because it has no memory guard. |
-| `cache_bytes` | `--cache-gb`. Without it, `min(max(free, longest, 1.5 GiB), 16 GiB)`, where `free = limit - active - 5 GiB` and `longest = context_fit() * kv`. | Room for one conversation as long as fits (`longest`), up to the 16 GiB cap, so its follow-up can continue from it. |
+| Memory floor | `LOCALS_MEMORY_FLOOR_PCT` (default 20) × physical memory (`hw.memsize`) | The memory the server leaves free for other apps. The 20% is a guess, not a measurement. `0` turns off the system-memory checks. |
+| `cache_bytes` (the start budget) | `service.cache_budget`: `--cache-gb` as it is. Without it, `min(max(free, longest, 1.5 GiB), 16 GiB)`, where `free = limit - active - 5 GiB` and `longest = context_fit() * kv`; with a memory floor, also at most `available - floor` at start (this cap wins over `longest`), but never below 1.5 GiB. | Room for one conversation as long as fits (`longest`), up to the 16 GiB cap, so its follow-up can continue from it. With `--cache-gb`, the budget never goes above it; low system memory can still shrink the cache below it. |
 
-`cache_bytes` is only the cache's own cap; the hard rule is `memory_limit`. At the automatic context limit, a single request's KV can take all the memory left beside the weights, and the guard empties the prompt cache for it.
+`cache_bytes` is only the cache's start budget; before each check of the guard the budget follows the system's available memory (see "Eviction"), and the hard rule is `memory_limit`. At the automatic context limit, a single request's KV can take all the memory left beside the weights, and the guard empties the prompt cache for it.
 
 **Admission.** `_fits(lru, r, held)` checks a request before it joins. Its estimate is `(len(prompt) * (1 + copies) + held) * kv + _admit_bytes(rows, tokens) + replies * _reply_bytes`, where `_admit_bytes` adds each new row's fixed state (2.2 times it) and 256 positions of KV to the room for a read (`_admit_bytes`: the most a read of as many tokens or more took, plus a sixth (1.5 GiB, `PREFILL_RESERVE`, until a read has been recorded)). `held` comes from `_merge_tokens`: every row padded to the longest one, plus one attention layer of the merged batch copied at a time. The estimate is compared with `memory_limit - (active - lru.nbytes)`, which assumes the prompt cache could be emptied. If it does not fit while other rows run, the request waits for a row to finish (counter `deferred`). With nothing running, the first request is always admitted. `_make_room` then drops the cache entries the admission needs.
 
@@ -197,7 +209,8 @@ According to the code's comments, `copy.deepcopy` of a cache does not duplicate 
 
 | Setting | Default | Effect |
 |---|---|---|
-| `--cache-gb` | Sized from free GPU memory | Prompt cache cap in GiB. |
+| `--cache-gb` | Sized from free GPU memory and available system memory | The start budget in GiB. The budget never goes above it; low system memory can still shrink the cache below it. |
+| `LOCALS_MEMORY_FLOOR_PCT` | `20` | The memory floor, in percent of physical memory. `0`: the cache budget no longer follows the system's memory, as before issue #56. A value that is not a number from 0 to under 100 prints a warning and uses 20. |
 | `--max-context` | What fits, at least 65,536, and at most the model's own context length | Prompt plus reply tokens per request. |
 | `LOCALS_REPLY_CHECKPOINT` | `1` | `0`: no reply checkpoints. |
 | `LOCALS_KEEP_THINK` | `1` | `0`: Qwen3.5's template as it is, earlier replies without their empty think block (see "The reply checkpoint"). |
@@ -212,6 +225,8 @@ According to the code's comments, `copy.deepcopy` of a cache does not duplicate 
 - `prompt_cache_mb` and `prompt_cache_entries`;
 - `prompt_cache_by_kind` (entries and MB per type);
 - `prompt_tokens` and `cached_tokens`;
-- the counters `cache_trims` and `deferred`, next to the engine's other counters (`steps`, `rows`, `prefill_s`, `prefill_tokens`, `admissions`, `idle_s`, `mixed_steps`). `cache_trims` and `deferred` appear only after the first trim or deferral. All counters start again from zero each time `serve()` restarts, for example after an engine error.
+- `prompt_cache_budget_mb` (the cache budget now), `prompt_cache_start_mb` (the start budget) and `memory_available_pct` (the percent of memory macOS counts as available, read at the request; `null` when it cannot be read);
+- `pressure_trims`: times the cache was trimmed because system memory was below the floor (always present, from 0);
+- the counters `cache_trims` and `deferred`, next to the engine's other counters (`steps`, `rows`, `prefill_s`, `prefill_tokens`, `admissions`, `idle_s`, `mixed_steps`). `cache_trims` (GPU-limit trims only) and `deferred` appear only after the first trim or deferral. All counters start again from zero each time `serve()` restarts, for example after an engine error.
 
 Under `memory` it reports `gpu_active_mb`, `gpu_peak_mb`, `gpu_cache_mb` and `rss_mb`.
