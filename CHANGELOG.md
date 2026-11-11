@@ -22,6 +22,8 @@
   `LOCALS_GROWTH_TRIM=0` turns off only the growth trim under the GPU limit: the memory-floor check still runs every
   32 steps, so a long reply gives memory back (issue #58). `defaults.memory_gb()` reads physical memory through
   `sysmem.physical_bytes()`, with no `sysctl` subprocess (issue #58).
+  The prompt cache drops the stale copies a new entry extends before the insert holds it to its budget, so with a
+  tight budget it no longer evicts another conversation for room the stale copies held (issue #58).
 - **Each shape in the tuning file records its MLX version** (issue #31). The file-wide `__mlx__` and the `__stale__`
   list are gone: `__timed__` maps each timed shape to the MLX version it was timed under, and a shape is stale when
   that is not the running version. A shape with no recorded version, or one pinned after two crashes, is never stale.

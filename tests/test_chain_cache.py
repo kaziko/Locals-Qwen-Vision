@@ -11,11 +11,11 @@ from mlx_lm.models.cache import ArraysCache  # noqa: E402
 from locals.hybrid_batch import chain_cache  # noqa: E402
 
 
-def _state():
+def _state(n: int = 4):
     import mlx.core as mx
 
     c = ArraysCache(1)
-    c[0] = mx.zeros((1, 4))
+    c[0] = mx.zeros((1, n))  # float32: 4 * n bytes
     return [c]
 
 
@@ -34,6 +34,32 @@ def test_stale_copies_of_a_conversation_go_but_not_the_system_prompt_or_the_chec
     assert lru.fetch_nearest_cache("m", [1, 2, 3, 4, 8])[1] == [3, 4, 8]  # from the system entry
     assert lru.fetch_nearest_cache("m", [1, 2, 9, 1])[1] == [1]
     assert lru.nbytes == 3 * _state()[0].nbytes
+
+
+def test_the_stale_copies_go_before_the_budget_drops_an_unrelated_entry():
+    """Issue #58: the copies a new entry makes stale no longer count when the budget (max_bytes) is held: dropping them
+    makes room for the new entry, so an unrelated conversation is not evicted for it."""
+    unit = _state(256)[0].nbytes  # 1 KiB
+    lru = chain_cache(max_size=100, max_bytes=5 * unit)
+    for i in range(3):
+        lru.insert_cache("m", [100 + i, 1], _state(256), cache_type="user")  # three other conversations
+    lru.insert_cache("m", [5, 6], _state(256), cache_type="assistant")  # an earlier reply
+    lru.insert_cache("m", [5, 6, 7, 8], _state(512), cache_type="assistant")  # its conversation went on: 2 KiB
+    assert lru.nbytes == 5 * unit and len(lru) == 4
+    assert lru.fetch_nearest_cache("m", [100, 1])[1] == []  # the oldest other conversation is still there
+    assert lru.fetch_nearest_cache("m", [5, 6, 7, 8])[1] == []
+    assert lru.fetch_nearest_cache("m", [5, 6, 9])[0] is None  # the stale reply went
+
+
+def test_an_entry_larger_than_the_budget_is_not_kept():
+    unit = _state(256)[0].nbytes
+    lru = chain_cache(max_size=100, max_bytes=3 * unit)
+    lru.insert_cache("m", [100, 1], _state(256), cache_type="user")
+    lru.insert_cache("m", [5, 6], _state(256), cache_type="assistant")
+    lru.insert_cache("m", [5, 6, 7, 8], _state(1024), cache_type="assistant")  # 4 KiB: more than the budget
+    assert lru.fetch_nearest_cache("m", [5, 6, 7, 8])[0] is None
+    assert lru.nbytes <= 3 * unit
+    assert lru.fetch_nearest_cache("m", [100, 1])[1] == []
 
 
 def test_the_disk_cache_is_private_and_forgets_a_file_that_does_not_load(tmp_path):

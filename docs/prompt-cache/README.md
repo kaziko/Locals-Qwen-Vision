@@ -115,13 +115,14 @@ thinking off there is no reasoning to keep.
 - **Which type loses an entry (`CacheOrder.pop`).** The types are checked in the order `assistant`, `user`, `system`. A type gives up its oldest entry if it has at least as many entries as the next type; otherwise the check moves on. `system` is the fallback. This balances the types rather than giving strict priority. For example, with 1 `assistant`, 3 `user` and 2 `system` entries, a `user` entry goes first.
 - **Bounds.** After an insert, at most one entry is evicted to stay within `max_size` (256). Then entries are evicted until the bytes are within `max_bytes`. `trim_to(n_bytes=...)` uses the same order.
 
-**ChainCache's prefix rules.** These apply after mlx-lm's own insert, and only for an untrimmable entry that is not `system`:
+**ChainCache's prefix rules.** These apply before mlx-lm's own insert, and only for an untrimmable entry that is not `system` (`_drop_stale`, issue #58):
 
-- First it checks that the new entry survived the insert's own eviction.
-- It then pops every shorter entry on the new entry's path (`pop_prefixes`) and drops it if:
+- It drops every shorter entry on the new entry's path if:
   - it is an `assistant` entry: the conversation has moved past that reply; or
   - it is a `user` entry and the new entry is `user` too: it was the previous request's checkpoint.
-- Every other prefix is put back in the trie, with its eviction position unchanged.
+- Every other prefix stays, with its eviction position unchanged.
+- Then mlx-lm's insert holds the cache to `max_size` and `max_bytes`, without the dropped entries. Before issue #58 they were dropped after it: with a tight budget, the insert evicted other entries that dropping them would have made room for.
+- An entry that does not fit is still not kept, and the stale entries are lost then as before: in the order above, a stale entry always goes before the entry that extends it.
 - A `system` entry is never dropped. A finished reply (`assistant`) does not drop its own request's `user` checkpoint, because a client that moves a message to the end on every turn (OpenClaw) continues from that checkpoint, not from the reply.
 - Inserting a `system` entry drops nothing. For trimmable caches, mlx-lm already drops all prefixes.
 

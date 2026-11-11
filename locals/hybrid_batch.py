@@ -585,23 +585,31 @@ def chain_cache(max_size: int, max_bytes: int):
       checkpoint of the request before. A finished reply does not drop the checkpoint of its own
       request: a client that moves a message to the end on every turn (OpenClaw) continues from
       that checkpoint, not from the reply;
-    * never a system-prompt entry: every new session starts from it."""
+    * never a system-prompt entry: every new session starts from it.
+
+    They go before the new entry is inserted, so they no longer count when the insert holds the cache to
+    ``max_bytes``: with a tight budget, it evicted other entries that dropping them would have made room for (issue
+    #58). An entry that does not fit is still not kept, and that costs nothing more than before: in mlx-lm's eviction
+    order a stale copy always goes before the entry that extends it."""
     from mlx_lm.models.cache import LRUPromptCache, can_trim_prompt_cache
 
     class ChainCache(LRUPromptCache):
         def insert_cache(self, model, tokens, prompt_cache, *, cache_type="assistant"):
+            if cache_type != "system" and not can_trim_prompt_cache(prompt_cache):
+                self._drop_stale(model, tokens, cache_type)
             super().insert_cache(model, tokens, prompt_cache, cache_type=cache_type)
-            if cache_type == "system" or can_trim_prompt_cache(prompt_cache):
-                return
-            node = self._trie._trie.get(model)
-            for t in tokens:  # still there (a small cache may have evicted it at once)?
-                node = node.get(t) if node is not None else None
-            if node is None or "__value__" not in node:
-                return
-            for n, entry in self._trie.pop_prefixes(model, tokens):
-                if not (entry.cache_type == "assistant" or (entry.cache_type == "user" and cache_type == "user")):
-                    self._trie.add(model, tokens[:n], entry)  # kept, its place in the LRU unchanged
-                    continue
+
+        def _drop_stale(self, model, tokens, cache_type):
+            node, stale = self._trie._trie.get(model), []
+            for n, t in enumerate(tokens):  # the shorter entries on the new entry's path
+                if node is None:
+                    break
+                e = node.get("__value__")
+                if e is not None and (e.cache_type == "assistant" or (e.cache_type == "user" and cache_type == "user")):
+                    stale.append(n)
+                node = node.get(t)
+            for n in stale:
+                entry = self._trie.pop(model, tokens[:n])
                 self._n_bytes -= entry.nbytes
                 self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
                 self._lru.remove(model, tokens[:n])
