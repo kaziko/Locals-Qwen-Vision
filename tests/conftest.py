@@ -50,7 +50,6 @@ def _tuning_cache_copy(tmp_path_factory):
     has), but what a test tunes, under a loaded machine, never reaches ~/.cache/locals (a run once rewrote it)."""
     import json
     import os
-    import shutil
 
     try:
         from locals import kernels
@@ -58,13 +57,15 @@ def _tuning_cache_copy(tmp_path_factory):
         yield
         return
     copy = tmp_path_factory.mktemp("tune") / os.path.basename(kernels._TUNE_PATH)
-    if os.path.exists(kernels._TUNE_PATH):  # this MLX's own file, as it is
-        shutil.copy(kernels._TUNE_PATH, copy)
-    else:  # none: what the seed holds, every shape in it as timed under this MLX (a test tunes nothing it has)
+    # this MLX's own file, or (none) what the seed holds, with every shape as timed under this MLX: a test tunes
+    # nothing it has, stale or not (a file a seed started under an MLX upgrade holds stale shapes too)
+    try:
+        data = kernels._per_shape(kernels._read_tune(kernels._TUNE_PATH))
+    except Exception:  # noqa: BLE001  (none, or one that does not parse)
         data = kernels._seed()[1]
-        if data:
-            data["__timed__"] = dict.fromkeys(kernels._shape_keys(data), kernels.mx.__version__)
-            copy.write_text(json.dumps(data))
+    if data:
+        data["__timed__"] = dict.fromkeys(kernels._shape_keys(data), kernels.mx.__version__)
+        copy.write_text(json.dumps(data))
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(kernels, "_TUNE_PATH", str(copy))
         mp.setattr(kernels, "_TUNE", None)

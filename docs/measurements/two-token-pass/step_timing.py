@@ -75,7 +75,7 @@ model, tok = rt.model, rt.tokenizer
 tune = K._load_tune()
 # (issue #31: each shape records its MLX version, so the file has no one version; results before it hold tune_cache_mlx)
 setup["tune_cache_stale"] = len(K._stale_keys(tune))
-print(f"tune cache has {setup['tune_cache_stale']} shapes timed under another MLX (stale)", flush=True)
+print(f"tuning file has {setup['tune_cache_stale']} shapes timed under another MLX (stale)", flush=True)
 
 # (N, K, dtype name) -> the layers. The dtype is the one warm-up and K._choose key a choice on (K._mod_dt: the
 # activations' dtype, Runtime's compute dtype)

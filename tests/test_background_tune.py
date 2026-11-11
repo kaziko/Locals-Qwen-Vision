@@ -584,3 +584,30 @@ def test_a_file_with_per_shape_versions_ignores_a_stale_list_and_a_pin_is_never_
     assert kernels._stale_keys(kernels._load_tune()) == [old]
     saved = json.loads(path.read_text())
     assert "__stale__" not in saved and "__mlx__" not in saved and kernels._stale_keys(saved) == [old]
+
+
+def test_a_merge_takes_a_shapes_family_winners_from_the_same_side():
+    """A shape taken from ``theirs`` kept ``mine``'s per-family winners (``key|family``, which whole-step tuning
+    reads): the choice from one side, the winners from the other."""
+    A = "1024x512x1"
+    mine = {A: ("mlx",), f"{A}|frag": ("frag", 2, 2, 1), f"{A}|mlx": ("mlx",), "__timed__": {A: "0.0.1"}}
+    theirs = {A: ("frag", 4, 2, 1), f"{A}|frag": ("frag", 4, 2, 1), "__timed__": {A: mx.__version__}}
+    out = kernels._merge_tune(mine, theirs)
+    assert out[A] == ("frag", 4, 2, 1) and out[f"{A}|frag"] == ("frag", 4, 2, 1) and f"{A}|mlx" not in out
+
+
+def test_one_file_with_per_shape_versions_logs_its_stale_shapes_after_an_mlx_upgrade(tmp_path, monkeypatch, capsys):
+    """One ``LOCALS_TUNE_CACHE`` file, first opened under a new MLX: the log line said so through the file's
+    ``__mlx__``, which is gone. It comes while no shape in the file was timed under this MLX."""
+    import json
+
+    A, B = "1024x512x1", "1024x512x2"
+    path = _old_file(tmp_path, monkeypatch, {A: ["mlx"], B: ["mlx"], "__timed__": {A: "0.0.1", B: "0.0.1"}})
+    kernels._load_tune()
+    assert "MLX is 0" in (err := capsys.readouterr().err) and "(0.0.1 when" in err and "the 2 kernel shapes" in err
+    data = json.loads(path.read_text())
+    data["__timed__"][A] = mx.__version__  # (one shape timed again under this MLX)
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(kernels, "_TUNE", None)
+    assert kernels._stale_keys(kernels._load_tune()) == [B]
+    assert "kernel shapes" not in capsys.readouterr().err  # (said once, not at every start)
