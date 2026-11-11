@@ -674,6 +674,7 @@ class HybridBatchEngine(BatchEngine):
         self.memory_floor = 0
         self.start_budget = 0
         self.read_available = sysmem.available_bytes  # bytes, or None when unknown (then nothing changes)
+        self._unseen = None  # (reading, bytes given back after it that no reading showed yet): see _seen
         self._kv_tok = None
         self._kv_layers = 1
         self._row_bytes = None  # fixed state bytes per request (_row_state)
@@ -922,7 +923,7 @@ class HybridBatchEngine(BatchEngine):
         Called by every kind of step: chained, boundary (all of them while a request waits for memory: the trim
         never ran then, when memory is tightest) and a lone row's passes."""
         lru = getattr(self, "_serve_lru", None)
-        if lru is not None and self.memory_limit and _GROWTH_TRIM and self.counters["steps"] >= self._next_trim:
+        if lru is not None and _GROWTH_TRIM and self.counters["steps"] >= self._next_trim:
             self._next_trim = self.counters["steps"] + 32  # (a multiple of 32 can be passed by in a lone row's passes)
             self._trim_for(lru, n_rows * positions * self._kv_bytes_per_token())
 
@@ -941,11 +942,9 @@ class HybridBatchEngine(BatchEngine):
         buffers, so the request's next write copies them, and ``positions`` (its prompt) of KV then exist
         twice. Near the context limit that is past the GPU's memory; the copy is then left out (it is only
         a prompt-cache entry)."""
-        if not self.memory_limit:
-            return True
         need = positions * self._kv_bytes_per_token() + self._admit_bytes(0, PREFILL_TOKENS)
         self._trim_for(lru, need)
-        return mx.get_active_memory() + need <= self.memory_limit
+        return not self.memory_limit or mx.get_active_memory() + need <= self.memory_limit
 
     def _fits(self, lru, r, held: int, rows: int = 1, tokens: int = 0) -> bool:
         """Whether admitting ``r`` (its whole prompt uncached, at worst) can fit under ``memory_limit`` once the
@@ -966,25 +965,83 @@ class HybridBatchEngine(BatchEngine):
         ``held`` more positions (the merge into the running batch:
         _merge_tokens) and the prefill transient (attention scores, bounded by
         PREFILL_SCORES)."""
-        if not self.memory_limit or lru is None:
+        if lru is None:
             return
         self._trim_for(lru, (tokens * (1 + copies) + held) * self._kv_bytes_per_token() + self._admit_bytes(rows, tokens))
 
-    def _pressure_trim(self, lru) -> None:
-        """Set the prompt cache's budget from the memory macOS has available: min(start budget, cache bytes now +
-        available bytes - memory floor). A cache over it drops entries (least valuable first, as trim_to does)
-        and counts ``pressure_trims``; memory that comes back raises the budget again, never above the start
-        budget. An unknown reading changes nothing."""
+    def _budget(self, lru, avail: int, adding: int = 0) -> int:
+        """The cache budget for ``avail`` bytes available (_seen): min(start budget, cache bytes now + ``adding`` (an
+        entry about to go in whose memory is in use already) + avail - memory floor). 0 at the least: below the floor
+        the cache keeps nothing."""
+        return max(0, min(self.start_budget, lru.nbytes + adding + avail - self.memory_floor))
+
+    def _seen(self, raw: int) -> int:
+        """A reading of available memory, plus the bytes the guard gave back since an earlier reading that it does
+        not show yet (_note_freed). Dropped entries can share their buffers with a running row (a checkpoint copy, a
+        reply's views) and free nothing, and the reading may lag: without this, every check while the reading stayed
+        the same cut the same shortfall again (one admission runs several), until the cache was empty."""
+        if self._unseen is None:
+            return raw
+        at, freed = self._unseen
+        left = freed - max(0, raw - at)
+        if left <= 0:
+            self._unseen = None
+            return raw
+        return raw + left
+
+    def _note_freed(self, raw: int, n: int) -> None:
+        """``n`` bytes given back after the reading ``raw``: counted as available until a reading shows them."""
+        if n > 0:
+            self._unseen = (raw, self._seen(raw) - raw + n)
+
+    def _free_unused(self, short) -> bool:
+        """Free what costs no prompt-cache entry, cheapest first, while ``short()`` (asked after each step) holds:
+        finished rows' caches in reference cycles and MLX's pool of freed buffers (macOS counts it as used, and the GPU
+        limit does too), then the shared-prefix snapshots. Whether it still holds."""
+        import gc
+
+        gc.collect()  # finished rows' caches can sit in reference cycles until the collector runs
+        mx.clear_cache()
+        if not short():
+            return False
+        if self.snapshots:
+            self.snapshots.clear()
+            mx.clear_cache()
+            return short()
+        return True
+
+    def _pressure_trim(self, lru, adding: int = 0) -> None:
+        """Set the prompt cache's budget from the memory macOS has available (_budget); ``adding``: the bytes of an
+        entry about to go in whose buffers are in use already (a lone row's retire moves them as they are), so it
+        does not push out older entries, or itself. Below the floor, what costs no entry goes first (_free_unused),
+        then entries least valuable first (as trim_to does), counting ``pressure_trims``; what that gives back counts
+        as available until a reading shows it (_seen). Memory that comes back raises the budget again, never above the
+        start budget. An unknown reading changes nothing."""
         if not self.memory_floor:
             return
-        avail = self.read_available()
-        if avail is None:
+        raw = self.read_available()
+        if raw is None:
             return
-        budget = max(0, min(self.start_budget, lru.nbytes + avail - self.memory_floor))
+        if self._seen(raw) < self.memory_floor:
+            held = mx.get_active_memory() + mx.get_cache_memory()
+
+            def short():
+                nonlocal raw, held
+                now = mx.get_active_memory() + mx.get_cache_memory()
+                self._note_freed(raw, held - now)
+                held = now
+                again = self.read_available()
+                raw = raw if again is None else again
+                return self._seen(raw) < self.memory_floor
+
+            self._free_unused(short)
+        budget = self._budget(lru, self._seen(raw), adding)
         lru.max_bytes = budget
-        if lru.nbytes > budget:
-            lru.trim_to(n_bytes=budget)
+        if self._seen(raw) < self.memory_floor and lru.nbytes + adding > budget:
+            n = lru.nbytes
+            lru.trim_to(n_bytes=max(0, budget - adding))
             mx.clear_cache()
+            self._note_freed(raw, n - lru.nbytes)
             self.counters["pressure_trims"] = self.counters.get("pressure_trims", 0) + 1
 
     def _trim_for(self, lru, need: int) -> None:
@@ -995,22 +1052,14 @@ class HybridBatchEngine(BatchEngine):
         self._pressure_trim(lru)
         if not self.memory_limit:
             return
-        over = mx.get_active_memory() + need - self.memory_limit
-        if over > 0:
-            import gc
 
-            gc.collect()  # finished rows' caches can sit in reference cycles until the collector runs
-            mx.clear_cache()  # MLX's pool of freed buffers counts against the GPU limit too
-            over = mx.get_active_memory() + need - self.memory_limit
-        if over > 0 and self.snapshots:
-            self.snapshots.clear()
+        def over():
+            return mx.get_active_memory() + need - self.memory_limit
+
+        if over() > 0 and self._free_unused(lambda: over() > 0) and len(lru):
+            lru.trim_to(n_bytes=max(0, lru.nbytes - over()))
             mx.clear_cache()
-            over = mx.get_active_memory() + need - self.memory_limit
-        if over > 0:
-            if len(lru):
-                lru.trim_to(n_bytes=max(0, lru.nbytes - over))
-                mx.clear_cache()
-                self.counters["cache_trims"] = self.counters.get("cache_trims", 0) + 1
+            self.counters["cache_trims"] = self.counters.get("cache_trims", 0) + 1
         if _MEMLOG:
             print(f"[mem] room for {need / 1e9:.2f} GB: active {mx.get_active_memory() / 1e9:.2f} GB, prompt cache "
                   f"{lru.nbytes / 1e9:.2f} GB in {len(lru)}, limit {self.memory_limit / 1e9:.2f}", flush=True)
@@ -2476,6 +2525,10 @@ class HybridBatchEngine(BatchEngine):
                             c.held = None  # (a parked step's flags: not the prompt cache's)
                 mx.eval([c.state for c in row])
                 reply = _reply_entry(r, row)
+                if len(rows) == 1:
+                    # the budget the last check set counted these buffers as used memory: moved, they take no more,
+                    # so the budget makes room for them (else the insert pushed out older entries, or this one)
+                    self._pressure_trim(lru, adding=sum(c.nbytes for c in (row if reply is None else reply)))
                 if reply is None:
                     lru.insert_cache(lru_key, list(key[:-1]) + r.fed, row)
                 else:

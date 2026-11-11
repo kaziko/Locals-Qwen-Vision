@@ -14,6 +14,11 @@
   `LOCALS_MEMORY_FLOOR_PCT` (default 20% of RAM, a guess the manual check of the issue tunes; `0` turns it all off).
   `/stats` and `locals status` show the budget now, the start budget, available memory and `pressure_trims`.
   `cache_trims` still counts only GPU-limit trims. The stock engine's cache is unchanged.
+  After code review: one shortfall is cut once. What a trim gave back counts as available until a reading shows it,
+  so checks with an unchanged reading no longer emptied the cache. Below the floor, MLX's pool of freed buffers and
+  the shared-prefix snapshots go before any entry. A lone row's retire sets the budget with its entry's bytes added:
+  its buffers move as they are, so the insert no longer pushed out older entries or itself. The system-memory check
+  also runs with no GPU limit. At run time the budget can fall to 0; the 1.5 GiB minimum is for the start budget.
 - **Each shape in the tuning file records its MLX version** (issue #31). The file-wide `__mlx__` and the `__stale__`
   list are gone: `__timed__` maps each timed shape to the MLX version it was timed under, and a shape is stale when
   that is not the running version. A shape with no recorded version, or one pinned after two crashes, is never stale.

@@ -13,7 +13,7 @@ The token sequence a prompt is stored under in the prompt cache. For a text prom
 _Avoid_: lookup tokens, key tokens
 
 **Cache budget**:
-The most memory the prompt cache may hold right now. It starts from what the Mac has free, shrinks when other apps need memory, grows back when they let it go, and never passes the size the user set.
+The most memory the prompt cache may hold right now. It starts from what the Mac has free, shrinks when other apps need memory, grows back when they let it go, and never passes the size the user set. When less than the memory floor is free, it can be zero.
 _Avoid_: cache size, cache limit, cache cap
 
 **Start budget**:

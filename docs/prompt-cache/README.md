@@ -129,11 +129,14 @@ The docstring gives the reason: with Qwen3.5, every agent step left another copy
 
 **The memory guard.** `_trim_for(lru, need)` first sets the cache budget from the memory macOS has available (`_pressure_trim`, issue #56; GLOSSARY.md "Cache budget", "Memory floor"):
 
-- `budget = min(start budget, lru.nbytes + available bytes - memory floor)`, written to `lru.max_bytes`, so later inserts keep the cache within it.
-- If the cache holds more than the budget: `lru.trim_to(n_bytes=budget)` in the eviction order above, then `mx.clear_cache()`. This counts `pressure_trims`.
+- `budget = min(start budget, lru.nbytes + available bytes - memory floor)`, written to `lru.max_bytes`, so later inserts keep the cache within it. At run time the budget can fall to 0: below the floor, the cache keeps nothing, system prompts included. The 1.5 GiB minimum is for the start budget only.
+- Below the floor, the cheap memory goes first: `gc.collect()` and `mx.clear_cache()` (MLX's pool of freed buffers, which macOS counts as used), then the shared-prefix snapshots. The reading is taken again after each step.
+- If the cache still holds more than the budget: `lru.trim_to(n_bytes=budget)` in the eviction order above, then `mx.clear_cache()`. This counts `pressure_trims`.
+- What a step gave back (the drop in MLX's active and pool memory, and the bytes of the dropped entries) counts as available until a reading shows it (`_seen`). Dropped entries can share their buffers with a running row and free nothing, and the reading may lag. Without this, each check with the same reading cut the same shortfall again, until the cache was empty.
+- A lone row's retire moves its buffers into the prompt cache as they are. The last reading counted them as used memory, so the budget is set again with the entry's bytes added (`_pressure_trim(lru, adding=...)`). Without this, the insert could push out older entries, or the new entry itself.
 - The budget never goes above the start budget. When memory comes back, the same rule raises it again; there is no separate grow-back step.
 - Available bytes are `kern.memorystatus_level` (the percent of memory macOS counts as available) times physical memory, read through `sysctlbyname` at every call (`locals/sysmem.py`; one `available_bytes()` took 1.96 µs on a 32 GB Mac, project venv, 10,000 calls). A read that fails changes nothing: no trim and no growth.
-- `LOCALS_MEMORY_FLOOR_PCT=0` turns this step off.
+- `LOCALS_MEMORY_FLOOR_PCT=0` turns this step off. The step also runs when `memory_limit` is 0 (no GPU guard).
 
 Then it acts when active memory plus `need` exceeds `memory_limit`. It escalates in this order:
 
@@ -145,7 +148,7 @@ It is called:
 
 - before each admission (`_make_room`);
 - before each checkpoint copy (`_room_for_copy`);
-- at retire when other rows are running;
+- at retire when other rows are running (a lone row's retire runs only the system-memory step, see above);
 - every 32 decode steps for the rows' growth (`LOCALS_GROWTH_TRIM`, on by default).
 
 After an engine error such as a Metal out-of-memory error, the service halves the cache (`lru.trim_to(n_bytes=lru.nbytes // 2)`) and serves again.
