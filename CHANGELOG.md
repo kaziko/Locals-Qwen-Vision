@@ -4,10 +4,12 @@
 
 - **The prompt cache follows the memory macOS has available** (issue #56). The `locals` engine's start budget, with
   no `--cache-gb`, is also capped at the available system memory less a memory floor (but never below 1.5 GiB). At
-  each check of the memory guard (before an admission, and at the growth trim every 32 steps) the budget is
+  each check of the memory guard (before an admission or a checkpoint copy, at a row's retire, and at the growth
+  trim every 32 steps) the budget is
   `min(start budget, cache bytes now + available bytes - floor)`: a cache over it drops entries, least valuable
   first, and counts `pressure_trims`; when memory comes back the budget grows again, up to the start budget.
-  `--cache-gb` stays a hard upper cap, and low memory can still shrink the cache below it. Available memory is
+  With `--cache-gb`, the start budget is that size and the budget never goes above it; low memory can still shrink
+  the cache below it. Available memory is
   `kern.memorystatus_level` x physical memory (`locals/sysmem.py`); a failed read changes nothing. The floor is
   `LOCALS_MEMORY_FLOOR_PCT` (default 20% of RAM, a guess the manual check of the issue tunes; `0` turns it all off).
   `/stats` and `locals status` show the budget now, the start budget, available memory and `pressure_trims`.

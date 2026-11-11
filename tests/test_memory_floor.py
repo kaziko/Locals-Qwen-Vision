@@ -51,6 +51,19 @@ def test_start_budget_without_cache_gb_is_capped_by_available_memory_but_not_bel
     assert cache_budget(LIMIT, 3 * G, 0, available=7 * G, floor=FLOOR) == 1610612736  # 1.5 GiB at least
     assert cache_budget(LIMIT, 3 * G, 0, available=None, floor=FLOOR) == 16 * G  # unknown: as today
     assert cache_budget(LIMIT, 3 * G, 0, available=7 * G, floor=0) == 16 * G  # floor 0: off, as today
+    # below the 16 GiB cap: free = 26.8 GB - 12 GiB - 5 GiB
+    assert cache_budget(LIMIT, 12 * G, 0, available=7 * G, floor=0) == 8546992128
+
+
+def test_the_floor_in_bytes_follows_the_setting(monkeypatch):
+    monkeypatch.setattr(sysmem, "physical_bytes", lambda: 32 * G)
+    monkeypatch.delenv("LOCALS_MEMORY_FLOOR_PCT", raising=False)
+    assert sysmem.floor_bytes() == FLOOR
+    monkeypatch.setenv("LOCALS_MEMORY_FLOOR_PCT", "0")
+    assert sysmem.floor_bytes() == 0  # off: the engine never reads system memory
+    monkeypatch.delenv("LOCALS_MEMORY_FLOOR_PCT")
+    monkeypatch.setattr(sysmem, "physical_bytes", lambda: None)
+    assert sysmem.floor_bytes() == 0  # physical memory unknown: off
 
 
 def test_start_budget_with_cache_gb_is_exactly_that():
@@ -105,11 +118,16 @@ def _guard(start, floor, reading):
 def test_low_memory_trims_the_cache_before_an_admission_least_valuable_first():
     floor = 100 * M
     reading = [floor - 4 * M]  # 4 MiB short of the floor
-    e, lru = _guard(8 * M, floor, reading), _lru(6, 8 * M)
+    e = _guard(8 * M, floor, reading)
+    lru = _lru(0, 8 * M)
+    lru.insert_cache("m", [7, 7, 7], _entry(), cache_type="system")  # the oldest entry, but a system prompt
+    for i in range(5):
+        lru.insert_cache("m", [1000 + i, 1, 2], _entry(), cache_type="user")
     e._make_room(lru, tokens=16, copies=0, held=0)
     assert lru.nbytes == 2 * M and len(lru) == 2  # budget = min(8, 6 + (-4)) MiB
-    assert lru.fetch_nearest_cache("m", [1005, 1, 2])[1] == [] and lru.fetch_nearest_cache("m", [1004, 1, 2])[1] == []
-    assert lru.fetch_nearest_cache("m", [1000, 1, 2])[0] is None  # the oldest went first
+    assert lru.fetch_nearest_cache("m", [7, 7, 7])[1] == []  # the system prompt stays
+    assert lru.fetch_nearest_cache("m", [1004, 1, 2])[1] == []  # and the newest checkpoint
+    assert lru.fetch_nearest_cache("m", [1003, 1, 2])[0] is None
     assert e.counters == {"pressure_trims": 1}  # not a GPU-limit trim: no cache_trims
 
 

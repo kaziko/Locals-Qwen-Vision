@@ -1,6 +1,5 @@
 """The memory macOS has available to every app, for the prompt cache's budget (issue #56; GLOSSARY.md "Cache budget",
-"Memory floor"). ``kern.memorystatus_level`` is the percent of physical memory macOS counts as available (free,
-inactive and purgeable pages). One ``available_bytes()`` took 1.96 us (32 GB Mac, the project venv's CPython, 10,000
+"Memory floor"). ``kern.memorystatus_level`` is the percent of physical memory macOS counts as available. One ``available_bytes()`` took 1.96 us (32 GB Mac, the project venv's CPython, 10,000
 calls; triage timed the bare ``sysctlbyname`` read at about 1.7 us), so it is read at every check of the memory
 guard. Any failure reads as unknown (None): the caller then changes nothing."""
 
@@ -52,7 +51,7 @@ FLOOR_PCT = 20.0  # a guess, not a measurement: the manual check of issue #56 tu
 
 def floor_pct() -> float:
     """The memory floor in percent of physical memory: ``LOCALS_MEMORY_FLOOR_PCT``, else 20. 0 turns the pressure
-    check off. A value that is not a number from 0 to 100 prints a warning and gives 20."""
+    check off. A value that is not a number from 0 up to (not including) 100 prints a warning and gives 20."""
     v = os.environ.get("LOCALS_MEMORY_FLOOR_PCT")
     if v in (None, ""):
         return FLOOR_PCT
@@ -61,6 +60,12 @@ def floor_pct() -> float:
     except ValueError:
         pct = -1.0
     if not 0 <= pct < 100:
-        print(f"locals: LOCALS_MEMORY_FLOOR_PCT={v!r} is not a number from 0 to 100; {FLOOR_PCT:g}%", file=sys.stderr)
+        print(f"locals: LOCALS_MEMORY_FLOOR_PCT={v!r} is not a number from 0 to under 100; {FLOOR_PCT:g}%", file=sys.stderr)
         return FLOOR_PCT
     return pct
+
+
+def floor_bytes() -> int:
+    """The memory floor in bytes: ``floor_pct()`` of physical memory. 0 (off) when either is 0 or unknown."""
+    total, pct = physical_bytes(), floor_pct()
+    return int(total * pct / 100) if total and pct else 0

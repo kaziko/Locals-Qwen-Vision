@@ -199,11 +199,11 @@ def cache_budget(limit: int, active: int, longest: int, cache_bytes: Optional[in
     1.5 GiB. The memory guard empties the prompt cache for running rows as they need it."""
     if cache_bytes:
         return int(cache_bytes)
-    least = int(1.5 * (1 << 30))
+    smallest = int(1.5 * (1 << 30))
     free = limit - active - (5 << 30)
-    budget = min(max(free, longest, least), 16 << 30)
+    budget = min(max(free, longest, smallest), 16 << 30)
     if floor and available is not None:
-        budget = max(min(budget, available - floor), least)
+        budget = max(min(budget, available - floor), smallest)
     return int(budget)
 
 
@@ -752,12 +752,12 @@ class BatchService:
         from . import sysmem
 
         # the memory the server leaves free for other apps (issue #56): the prompt cache's budget follows the
-        # memory macOS has available, at start and before each admission; LOCALS_MEMORY_FLOOR_PCT=0: off
-        total, pct = sysmem.physical_bytes(), sysmem.floor_pct()
-        floor = int(total * pct / 100) if total and pct else 0
+        # memory macOS has available, at start and at each check of the memory guard; LOCALS_MEMORY_FLOOR_PCT=0: off
+        floor = sysmem.floor_bytes()
         if self.cache_bytes is None:
+            active = mx.get_active_memory()  # (read before context_fit, as before issue #56)
             longest = (self.context_fit() or 0) * eng._kv_bytes_per_token()
-            self.cache_bytes = cache_budget(limit, mx.get_active_memory(), longest,
+            self.cache_bytes = cache_budget(limit, active, longest,
                                             available=sysmem.available_bytes() if floor else None, floor=floor)
         eng.memory_floor, eng.start_budget = floor, self.cache_bytes
         lru = chain_cache(max_size=256, max_bytes=self.cache_bytes)
