@@ -15,7 +15,9 @@
   shipped M2 preset, 11273 keys, measured on an M2 Max Mac with the repo's Python: 1.79 s before, 0.01 s after). A
   save that takes a shape from the file drops this process's stale per-family winners and cached choice for it. A
   whole-step choice records its MLX version. A merge writes no empty `__timed__`. The MLX upgrade line comes once
-  per version (`__opened__`), not at every start until a shape is timed again.
+  per version (`__opened__`), not at every start until a shape is timed again. When neither side timed a shape
+  under this MLX, a save keeps the side that has a recorded version, so a timing wins over a preset choice. A seed
+  from before files recorded an MLX version is stale, as every seed was before.
 - **Vision cleanups** (issue #35). `vision.preprocess` cuts both families' patches with one formula, read from one
   table per family that `vision.measure` reads too. The output is bit-identical to before for Qwen and Gemma, checked
   on both test pictures and on two seeded noise pictures (Pillow 13.0.0, numpy 2.5.3); a test in `tests/test_vision.py`

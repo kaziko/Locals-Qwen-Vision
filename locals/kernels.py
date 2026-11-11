@@ -190,24 +190,25 @@ _STALE_MARK = "stale"  # (no real MLX version: a shape an old file's ``__stale__
 _OLD_KEYS = ("__mlx__", "__stale__")  # (a file from before per-shape versions: read to convert, never written)
 
 
-def _versions(data: dict) -> dict:
+def _versions(data: dict, seed: bool = False) -> dict:
     """The MLX version each shape in ``data`` (a tuning file as read) was timed under (``__timed__``). A file from
     before per-shape versions converts: a shape in its ``__stale__`` list gets a mark no MLX has, the others its
-    ``__mlx__``, or this MLX where it has none (a file from before ``__mlx__``: nothing stale). A file that has
+    ``__mlx__``, or this MLX where it has none (a file from before ``__mlx__``: nothing stale; in a ``seed``, of
+    another version's to start from, the mark: each shape is stale, as every seed was before). A file that has
     ``__timed__`` keeps it, and a ``__stale__`` list in it (an older locals on a shared file) counts for nothing."""
     if "__timed__" in data:
         return dict(data["__timed__"])
     was = data.get("__mlx__")
     if was is None:
-        return {k: mx.__version__ for k in _shape_keys(data)}
+        return dict.fromkeys(_shape_keys(data), _STALE_MARK if seed else mx.__version__)
     stale = set(data.get("__stale__") or ())
     return {k: _STALE_MARK if k in stale else was for k in _shape_keys(data)}
 
 
-def _per_shape(data: dict) -> dict:
+def _per_shape(data: dict, seed: bool = False) -> dict:
     """``data`` with ``__timed__`` (_versions), and without the file-wide ``__mlx__`` and ``__stale__``."""
     out = {k: v for k, v in data.items() if k not in _OLD_KEYS}
-    timed = _versions(data)
+    timed = _versions(data, seed)
     if timed:
         out["__timed__"] = timed
     else:
@@ -329,7 +330,7 @@ def _seed() -> tuple:
                 continue
     for _, p in sorted(found, reverse=True):
         try:
-            return p, _per_shape(_read_tune(p))
+            return p, _per_shape(_read_tune(p), seed=True)
         except Exception:  # noqa: BLE001
             continue
     return None, None
@@ -585,7 +586,8 @@ def _crashed_shapes(tune: dict, keep_markers: bool = False) -> bool:
 def _merge_tune(mine: dict, theirs: dict) -> dict:
     """Two tuning caches as one: ``mine`` (this process's) wins a key both have; dict-valued keys (``__times__``)
     and the lists of whole-step-tuned row counts are merged inside. A shape is taken from the side that timed it
-    under this MLX (``__timed__``), ``mine`` when both or neither did; its choice, its family winners (``key|family``),
+    under this MLX (``__timed__``), ``mine`` when both or neither did, unless only ``theirs`` has a version for it
+    (a timing wins over a preset choice: issue #31 review); its choice, its family winners (``key|family``),
     its timings and its version come from that one side. (Two processes of two MLX versions on one ``LOCALS_TUNE_CACHE`` file marked each other's
     shapes stale through a file-wide ``__mlx__`` and ``__stale__`` list.)"""
     out = dict(theirs)
@@ -604,7 +606,8 @@ def _merge_tune(mine: dict, theirs: dict) -> dict:
     for name in per_shape:
         out[name] = dict(out.get(name) or {})  # (a copy: never the dict of either side)
     for k in _shape_keys(mine) | _shape_keys(theirs):
-        side = theirs if k not in mine or tt.get(k) == now != mt.get(k) else mine
+        m, t = mt.get(k), tt.get(k)
+        side = theirs if k not in mine or t == now != m or (m is None and t is not None and k in theirs) else mine
         out[k] = side[k]
         for f in ow.get(k, ()):  # (its family winners: _tune_shape)
             out.pop(f, None)

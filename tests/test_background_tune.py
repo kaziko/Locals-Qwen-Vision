@@ -700,3 +700,25 @@ def test_the_mlx_upgrade_line_comes_once_while_no_shape_is_timed_again(tmp_path,
     monkeypatch.setattr(kernels, "_TUNE", None)
     assert kernels._stale_keys(kernels._load_tune()) == [A]
     assert "MLX is" not in capsys.readouterr().err and os.path.getmtime(path) == 0
+
+
+def test_a_merge_keeps_a_timing_over_a_shape_with_no_version():
+    """Code review of issue #31, finding 3: neither side timed P under this MLX, and ``mine`` has no version for it
+    (a preset choice): ``mine`` won, and the other process's timing of P, its choice and its version were lost."""
+    P = "1024x512x2"
+    mine = {P: ("mlx",)}
+    theirs = {P: ("frag", 2, 2, 1), "__times__": {P: {"frag": 1.0}}, "__timed__": {P: "0.0.2"}}
+    out = kernels._merge_tune(mine, theirs)
+    assert (out[P], out["__times__"][P], out["__timed__"][P]) == (("frag", 2, 2, 1), {"frag": 1.0}, "0.0.2")
+    assert kernels._merge_tune(theirs, mine)[P] == ("frag", 2, 2, 1)  # (a timing on this side: mine, as before)
+
+
+def test_a_seed_from_before_files_recorded_an_mlx_version_is_stale(tmp_path, monkeypatch):
+    """Code review of issue #31, finding 4: a seed with no ``__mlx__`` had every shape as timed under this MLX, so
+    none was timed again; before per-shape versions a seed was stale whole. Its shapes keep their choices, stale."""
+    import json
+
+    _version_dir(tmp_path, monkeypatch)
+    (tmp_path / kernels._TUNE_FILE).write_text(json.dumps({"1024x512x1": ["frag", 2, 2, 1]}))
+    tune = kernels._load_tune()
+    assert tune["1024x512x1"] == ("frag", 2, 2, 1) and kernels._stale_keys(tune) == ["1024x512x1"]
