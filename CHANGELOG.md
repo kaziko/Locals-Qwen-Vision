@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Each shape in the tuning file records its MLX version** (issue #31). The file-wide `__mlx__` and the `__stale__`
+  list are gone: `__timed__` maps each timed shape to the MLX version it was timed under, and a shape is stale when
+  that is not the running version. A shape with no recorded version, or one pinned after two crashes, is never stale.
+  A seed keeps its shapes' versions, so the shapes it timed under this MLX are no longer stale. A save takes each
+  shape, with its timings and version, from the side that timed it under this MLX, so two processes of two MLX
+  versions on one `LOCALS_TUNE_CACHE` file no longer mark each other's shapes stale. A `tune_v6` file from before
+  converts when it is read: a shape in its `__stale__` list stays stale, the others take its `__mlx__` (none: nothing
+  stale). The stale log line counts the stale shapes in the file the save wrote. The test session's tuning-file copy,
+  built from a seed of another MLX version, has every shape as timed under the running MLX.
 - **Vision cleanups** (issue #35). `vision.preprocess` cuts both families' patches with one formula, read from one
   table per family that `vision.measure` reads too. The output is bit-identical to before for Qwen and Gemma, checked
   on both test pictures and on two seeded noise pictures (Pillow 13.0.0, numpy 2.5.3); a test in `tests/test_vision.py`

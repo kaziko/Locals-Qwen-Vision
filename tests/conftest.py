@@ -48,6 +48,7 @@ def _no_real_user_files(tmp_path_factory, monkeypatch):
 def _tuning_cache_copy(tmp_path_factory):
     """Kernel tuning reads and writes a copy of the user's cache: its timings (a model test tunes nothing it
     has), but what a test tunes, under a loaded machine, never reaches ~/.cache/locals (a run once rewrote it)."""
+    import json
     import os
     import shutil
 
@@ -57,11 +58,13 @@ def _tuning_cache_copy(tmp_path_factory):
         yield
         return
     copy = tmp_path_factory.mktemp("tune") / os.path.basename(kernels._TUNE_PATH)
-    # this MLX's file, or the seed its first start would read; the copy then loads as this version's own file, so a
-    # seed naming this version marks nothing stale, where a first start marks all (a test tunes nothing it has)
-    source = kernels._TUNE_PATH if os.path.exists(kernels._TUNE_PATH) else kernels._seed()[0]
-    if source:
-        shutil.copy(source, copy)
+    if os.path.exists(kernels._TUNE_PATH):  # this MLX's own file, as it is
+        shutil.copy(kernels._TUNE_PATH, copy)
+    else:  # none: what the seed holds, every shape in it as timed under this MLX (a test tunes nothing it has)
+        data = kernels._seed()[1]
+        if data:
+            data["__timed__"] = dict.fromkeys(kernels._shape_keys(data), kernels.mx.__version__)
+            copy.write_text(json.dumps(data))
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(kernels, "_TUNE_PATH", str(copy))
         mp.setattr(kernels, "_TUNE", None)

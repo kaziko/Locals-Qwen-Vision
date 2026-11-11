@@ -58,11 +58,11 @@ def test_a_cut_short_tuning_cache_is_set_aside(tmp_path, monkeypatch):
     monkeypatch.setattr(kernels, "_TUNE_PATH", str(path))
     monkeypatch.setattr(kernels, "_TUNE", None)
     monkeypatch.setattr(kernels, "_preset_path", lambda: None)
-    assert kernels._load_tune() == {"__mlx__": mx.__version__}  # (the version its timings are taken with)
+    assert kernels._load_tune() == {}  # (issue #31: no file-wide __mlx__; a shape records its version when timed)
     assert (tmp_path / "tune.json.bad").exists()
     kernels._TUNE["3x64x2"] = ("mlx",)
     kernels._save_tune()
-    assert json.loads(path.read_text()) == {"3x64x2": ["mlx"], "__mlx__": mx.__version__}
+    assert json.loads(path.read_text()) == {"3x64x2": ["mlx"]}
 
 
 def test_a_model_that_does_not_fit_fp16_gets_its_own_arrays_back(monkeypatch):
