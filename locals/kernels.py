@@ -344,11 +344,11 @@ def _load_over(tune: dict, data: dict) -> None:
 def _new_mlx(data: dict) -> Optional[str]:
     """For a file with per-shape versions first opened under this MLX (it has stale shapes, and none timed under this
     MLX yet: one ``LOCALS_TUNE_CACHE`` file after an upgrade), the version most of its stale shapes were timed under,
-    for the log line (_report_stale); else ``None``."""
+    for the log line (_report_stale); else ``None``, and for a file already opened under this MLX (``__opened__``)."""
     import collections
 
     timed = data.get("__timed__") or {}
-    if mx.__version__ in timed.values():
+    if mx.__version__ in timed.values() or mx.__version__ in (data.get("__opened__") or ()):
         return None
     seen = collections.Counter(timed[k] for k in _stale_keys(data) if timed[k] != _STALE_MARK)
     return seen.most_common(1)[0][0] if seen else None
@@ -387,6 +387,9 @@ def _load_tune():
                 if not converted and not seed:
                     was = _new_mlx(user)
             _load_over(tune, user or {})
+            report = seed or was not in (None, mx.__version__)
+            if report:  # (the line comes once: the file records each MLX it was opened under, _new_mlx)
+                tune["__opened__"] = list(dict.fromkeys([*(tune.get("__opened__") or ()), mx.__version__]))
             _TUNE = tune
             crashed = _crashed_shapes(tune, keep_markers=stuck)
             _drop_old_temps()
@@ -396,7 +399,7 @@ def _load_tune():
                     saved = _save_tune()
                 except OSError:
                     pass
-                if seed or was not in (None, mx.__version__):
+                if report:
                     _report_stale(len(_stale_keys(saved)), was, seed)
     return _TUNE
 
@@ -596,19 +599,32 @@ def _merge_tune(mine: dict, theirs: dict) -> dict:
             out[k] = v
     now = mx.__version__
     mt, tt = mine.get("__timed__") or {}, theirs.get("__timed__") or {}
+    ow, mw, tw = (_family_winners(d) for d in (out, mine, theirs))  # (one pass each: a scan of every key for each
+    per_shape = ("__times__", "__timed__")                            # shape took 1.8 s on a preset)
+    for name in per_shape:
+        out[name] = dict(out.get(name) or {})  # (a copy: never the dict of either side)
     for k in _shape_keys(mine) | _shape_keys(theirs):
         side = theirs if k not in mine or tt.get(k) == now != mt.get(k) else mine
         out[k] = side[k]
-        for f in [f for f in out if f.startswith(k + "|")]:  # (its family winners: _tune_shape)
-            del out[f]
-        out.update({f: v for f, v in side.items() if f.startswith(k + "|")})
-        for name in ("__times__", "__timed__"):
+        for f in ow.get(k, ()):  # (its family winners: _tune_shape)
+            out.pop(f, None)
+        out.update({f: side[f] for f in (tw if side is theirs else mw).get(k, ())})
+        for name in per_shape:
             entries = side.get(name) or {}
             if k in entries:
-                out.setdefault(name, {})[k] = entries[k]
-            elif k in (out.get(name) or {}):
-                out[name] = {kk: vv for kk, vv in out[name].items() if kk != k}
-    return {k: v for k, v in out.items() if k not in _OLD_KEYS}
+                out[name][k] = entries[k]
+            else:
+                out[name].pop(k, None)
+    return {k: v for k, v in out.items() if k not in _OLD_KEYS and not (k in per_shape and not v)}
+
+
+def _family_winners(tune: dict) -> dict:
+    """Each shape's family winners in ``tune`` (``key|family``), by shape."""
+    out = {}
+    for f in tune:
+        if "|" in f:
+            out.setdefault(f.split("|", 1)[0], []).append(f)
+    return out
 
 
 def _save_tune() -> dict:
@@ -635,7 +651,11 @@ def _save_tune() -> dict:
             full = copy.deepcopy(_PRESET)  # (the file leaves out what the preset says: each side as loaded)
             _load_over(full, _per_shape(theirs))
             data = _merge_tune(_TUNE, full)
+            changed = {k for k in _shape_keys(data) if k in _TUNE and tuple(data[k]) != tuple(_TUNE[k])}
+            for k in [k for k in _TUNE if k not in data]:  # (a shape taken from the file: this process's family
+                del _TUNE[k]                                # winners for it, which update cannot take away)
             _TUNE.update(data)  # (a shape the file timed under this MLX replaces this process's)
+            _forget_choices(changed)
             data = _beyond_preset(data)
             fd, tmp = tempfile.mkstemp(dir=d, prefix=".tune-", suffix=".json")
             try:
@@ -651,6 +671,17 @@ def _save_tune() -> dict:
                     pass
                 raise
             return data
+
+
+def _forget_choices(keys: set) -> None:
+    """The choices this process cached for the shapes ``keys`` (_CHOICE, _DENSE), dropped: a save took another
+    process's choice for them, and the next call reads it from the cache."""
+    if not keys:
+        return
+    for c in [c for c in _CHOICE if _tune_key(*c) in keys]:
+        _CHOICE.pop(c, None)
+    for c in [c for c in _DENSE if _prefill_key(*c) in keys]:
+        _DENSE.pop(c, None)
 
 
 def _time_us(fn, reps=12):
@@ -1378,6 +1409,13 @@ def forward_last(model, tokens: mx.array, cache) -> mx.array:
     return head_logits(model, h)[:, -1, :]
 
 
+def _record_whole_step(tune: dict, key: str, c) -> None:
+    """A whole-step choice for ``key``, timed under this MLX (_timed_now): with no version, a save took another
+    process's per-shape choice over it, and its row count stayed done."""
+    tune[key] = list(c)
+    _timed_now(tune, key)
+
+
 def model_tune(model, ms=range(2, MAX_M + 1), families=("v3", "multi", "fragh", "frag", "fragq", "mma", "nax"), steps: int = 16, rounds: int = 5, verbose: bool = False) -> dict:
     """Pick one kernel family per row count M by timing the real decode step.
 
@@ -1450,7 +1488,10 @@ def model_tune(model, ms=range(2, MAX_M + 1), families=("v3", "multi", "fragh", 
         chosen = options[best] if med[best] < 0.98 * med["per-shape"] else base
         for (N, K, dt), c in chosen.items():
             _CHOICE[(N, K, M, dt)] = c
-            tune[keys[(N, K, dt)]] = list(c)
+            if chosen is base:
+                tune[keys[(N, K, dt)]] = list(c)
+            else:
+                _record_whole_step(tune, keys[(N, K, dt)], c)
         picked[M] = best if chosen is not base else "per-shape"
         done.append(M)
         tune[sig] = done

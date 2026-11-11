@@ -3,6 +3,7 @@ time while the server is idle (no model needed: a small quantized layer)."""
 
 import mlx.core as mx
 import mlx.nn as nn
+import pytest
 
 from locals import kernels
 
@@ -611,3 +612,91 @@ def test_one_file_with_per_shape_versions_logs_its_stale_shapes_after_an_mlx_upg
     monkeypatch.setattr(kernels, "_TUNE", None)
     assert kernels._stale_keys(kernels._load_tune()) == [B]
     assert "kernel shapes" not in capsys.readouterr().err  # (said once, not at every start)
+
+
+def test_a_merge_of_a_large_file_takes_well_under_a_second():
+    """Code review of issue #31: the merge scanned every key once per shape (``startswith(k + '|')``), quadratic in
+    the file's size; on the shipped M2 preset (11273 keys, 2133 shapes) it took 1.79 s, under the save's locks."""
+    import time
+
+    tune = {"__times__": {}, "__timed__": {}}
+    for i in range(2200):
+        k = f"{1024 + i}x512x2"
+        tune[k] = ("frag", 2, 2, 1)
+        tune["__times__"][k] = {"frag": 1.0}
+        tune["__timed__"][k] = "0.0.1"
+        for fam in ("frag", "fragh", "v3", "mlx"):
+            tune[f"{k}|{fam}"] = ("mlx",)
+    t = time.perf_counter()
+    kernels._merge_tune(dict(tune), dict(tune))
+    assert time.perf_counter() - t < 0.3
+
+
+def test_a_save_that_takes_a_shape_from_the_file_drops_this_processs_family_winners(tmp_path, monkeypatch):
+    """Code review of issue #31: the merge left out ``mine``'s ``key|family`` winners for a shape taken from the file,
+    but the save only updated the cache in memory, so they stayed there and the next save wrote them back."""
+    import json
+
+    A = "1024x512x1"
+    path = tmp_path / "tune.json"
+    monkeypatch.setattr(kernels, "_TUNE_PATH", str(path))
+    monkeypatch.setattr(kernels, "_PRESET", {})
+    path.write_text(json.dumps({A: ["frag", 4, 2, 1], f"{A}|frag": ["frag", 4, 2, 1], "__timed__": {A: mx.__version__}}))
+    monkeypatch.setattr(kernels, "_TUNE", {A: ("mlx",), f"{A}|frag": ("frag", 2, 2, 1), f"{A}|mlx": ("mlx",),
+                                           "__timed__": {A: "0.0.1"}})
+    kernels._save_tune()
+    assert f"{A}|mlx" not in kernels._TUNE and kernels._TUNE[f"{A}|frag"] == ("frag", 4, 2, 1)
+    kernels._save_tune()
+    assert f"{A}|mlx" not in json.loads(path.read_text())
+
+
+def test_a_save_that_takes_a_shape_from_the_file_drops_the_cached_choice(tmp_path, monkeypatch):
+    """Code review of issue #31: the save took the file's choice for a shape into the cache, but this process kept
+    running the choice it had cached (``_CHOICE``, ``_DENSE``) while the cache called the shape fresh."""
+    import json
+
+    A, P = "1024x512x2", "1024x512xP"
+    path = tmp_path / "tune.json"
+    monkeypatch.setattr(kernels, "_TUNE_PATH", str(path))
+    monkeypatch.setattr(kernels, "_PRESET", {})
+    path.write_text(json.dumps({A: ["frag", 2, 2, 1], P: ["dense"],
+                                "__timed__": {A: mx.__version__, P: mx.__version__}}))
+    monkeypatch.setattr(kernels, "_TUNE", {A: ("mlx",), P: ("quant",), "__timed__": {A: "0.0.1", P: "0.0.1"}})
+    monkeypatch.setattr(kernels, "_CHOICE", {(1024, 512, 2, "float16"): ("mlx",), (1024, 512, 3, "float16"): ("mlx",)})
+    monkeypatch.setattr(kernels, "_DENSE", {(1024, 512, "float16"): False})
+    kernels._save_tune()
+    assert kernels._CHOICE == {(1024, 512, 3, "float16"): ("mlx",)} and kernels._DENSE == {}
+
+
+def test_a_whole_step_choice_records_the_mlx_it_was_timed_under():
+    """Code review of issue #31: whole-step tuning wrote its choice with no version, so a save took the file's
+    per-shape choice over it, while its row count stayed on the done list: the whole-step result was lost for good."""
+    A = "1024x512x2"
+    tune = {A: ("mlx",), "__timed__": {A: "0.0.1"}}
+    kernels._record_whole_step(tune, A, ("frag", 2, 2, 1))
+    theirs = {A: ("v3", 1), "__timed__": {A: mx.__version__}}
+    assert kernels._merge_tune(tune, theirs)[A] == ["frag", 2, 2, 1]
+
+
+def test_a_merge_writes_no_empty_version_map():
+    """Code review of issue #31: a merge could leave ``"__timed__": {}``, which every load read as a file to
+    convert, and saved again."""
+    out = kernels._merge_tune({"1024x512x1": ("mlx",)}, {"__timed__": {"1024x512x1": "0.0.1"}})
+    assert "__timed__" not in out and "__times__" not in out
+
+
+@pytest.mark.parametrize("versions", [{"__timed__": {"1024x512x1": "0.0.1"}}, {"__mlx__": "0.0.1"}],
+                         ids=["per-shape", "from-before-per-shape"])
+def test_the_mlx_upgrade_line_comes_once_while_no_shape_is_timed_again(tmp_path, monkeypatch, capsys, versions):
+    """Code review of issue #31: until a shape was timed under the new MLX, every start rewrote the file and printed
+    the line again; with stale shapes of a model nobody serves, at every start for good."""
+    import os
+
+    A = "1024x512x1"
+    path = _old_file(tmp_path, monkeypatch, {A: ["mlx"], **versions})
+    kernels._load_tune()
+    assert "MLX is" in capsys.readouterr().err
+    os.utime(path, (0, 0))
+    monkeypatch.setattr(kernels, "_TUNE", None)
+    assert kernels._stale_keys(kernels._load_tune()) == [A]
+    assert "MLX is" not in capsys.readouterr().err and os.path.getmtime(path) == 0
