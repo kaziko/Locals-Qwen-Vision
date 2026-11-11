@@ -4,7 +4,8 @@
 
 - **The prompt cache follows the memory macOS has available** (issue #56). The `locals` engine's start budget, with
   no `--cache-gb`, is what the GPU limit leaves free at start (1.5 GiB to 16 GiB); system memory does not change it
-  (issue #58: a cap at start kept a server started in low memory at that low budget for good). At each check of the memory guard (before an admission or a checkpoint copy, at a row's retire, and at the growth
+  (issue #58: a cap at start kept a server started in low memory at that low budget for good). At each check of
+  the memory guard (before an admission or a checkpoint copy, at a row's retire, and at the growth
   trim every 32 steps) the budget is
   `min(start budget, cache bytes now + available bytes - floor)`: a cache over it drops entries, least valuable
   first, and counts `pressure_trims`; when memory comes back the budget grows again, up to the start budget.

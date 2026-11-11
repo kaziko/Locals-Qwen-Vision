@@ -600,15 +600,16 @@ def chain_cache(max_size: int, max_bytes: int):
             super().insert_cache(model, tokens, prompt_cache, cache_type=cache_type)
 
         def _drop_stale(self, model, tokens, cache_type):
-            node, stale = self._trie._trie.get(model), []
-            for n, t in enumerate(tokens):  # the shorter entries on the new entry's path
+            node, stale_lens = self._trie._trie.get(model), []
+            for n, t in enumerate(tokens):  # the shorter entries on the new entry's path, by length
                 if node is None:
                     break
-                e = node.get("__value__")
-                if e is not None and (e.cache_type == "assistant" or (e.cache_type == "user" and cache_type == "user")):
-                    stale.append(n)
+                old = node.get("__value__")
+                if old is not None and (old.cache_type == "assistant"
+                                        or (old.cache_type == "user" and cache_type == "user")):
+                    stale_lens.append(n)
                 node = node.get(t)
-            for n in stale:
+            for n in stale_lens:
                 entry = self._trie.pop(model, tokens[:n])
                 self._n_bytes -= entry.nbytes
                 self._n_bytes_by_type[entry.cache_type] -= entry.nbytes

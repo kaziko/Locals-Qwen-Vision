@@ -105,7 +105,7 @@ thinking off there is no reasoning to keep.
 | Follow-up question on a 138k-token document | 8 minutes | 2.4 s |
 | Prompts cached, four multi-turn conversations | 28% | 83% |
 
-`LOCALS_REPLY_CHECKPOINT=0` turns it off. The automatic cache budget is at least `context_fit() * kv` (one conversation as long as fits) but never more than 16 GiB, so that a follow-up can continue from it, unless the memory macOS has available caps it lower (see "Memory sizing").
+`LOCALS_REPLY_CHECKPOINT=0` turns it off. The automatic cache budget is at least `context_fit() * kv` (one conversation as long as fits) but never more than 16 GiB, so that a follow-up can continue from it. At run time the memory guard can lower the budget when macOS has little memory available (see "Eviction" and "Memory sizing").
 
 ## Eviction
 
@@ -123,6 +123,7 @@ thinking off there is no reasoning to keep.
 - Every other prefix stays, with its eviction position unchanged.
 - Then mlx-lm's insert holds the cache to `max_size` and `max_bytes`, without the dropped entries. Before issue #58 they were dropped after it: with a tight budget, the insert evicted other entries that dropping them would have made room for.
 - An entry that does not fit is still not kept, and the stale entries are lost then as before: in the order above, a stale entry always goes before the entry that extends it.
+- A side effect of mlx-lm's order: `CacheOrder.pop` picks the type to evict from by the number of entries per type, and dropping the stale entries first changes those numbers. Rarely, the insert then evicts a different, and in total a larger, set of other entries than when the stale entries went after it. In a randomized comparison of the two orders with fake entries (6 seeds x 75,000 inserts, budgets of 1 to 12 units, the review of issue #58), this happened in 4 inserts; the new order kept more other entries in 2,047, and never lost the new entry where the old order kept it.
 - A `system` entry is never dropped. A finished reply (`assistant`) does not drop its own request's `user` checkpoint, because a client that moves a message to the end on every turn (OpenClaw) continues from that checkpoint, not from the reply.
 - Inserting a `system` entry drops nothing. For trimmable caches, mlx-lm already drops all prefixes.
 
