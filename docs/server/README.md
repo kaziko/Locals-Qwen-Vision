@@ -724,3 +724,4 @@ Expected load errors, such as a model that is not on Hugging Face, or one that i
 | `LOCALS_DISK_CACHE` | `1` | `0` turns off the disk prompt cache |
 | `LOCALS_DISK_CACHE_DIR` | `~/.cache/locals/prompts` | where the disk prompt cache lives |
 | `LOCALS_DISK_CACHE_GB` | `4` | size of the disk prompt cache |
+| `LOCALS_MEMORY_FLOOR_PCT` | `20` | memory (percent of RAM) left free for other apps: the prompt cache follows it; `0` turns it off |

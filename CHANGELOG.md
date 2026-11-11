@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **The prompt cache follows the memory macOS has available** (issue #56). The `locals` engine's start budget, with
+  no `--cache-gb`, is also capped at the available system memory less a memory floor (but never below 1.5 GiB). At
+  each check of the memory guard (before an admission, and at the growth trim every 32 steps) the budget is
+  `min(start budget, cache bytes now + available bytes - floor)`: a cache over it drops entries, least valuable
+  first, and counts `pressure_trims`; when memory comes back the budget grows again, up to the start budget.
+  `--cache-gb` stays a hard upper cap, and low memory can still shrink the cache below it. Available memory is
+  `kern.memorystatus_level` x physical memory (`locals/sysmem.py`); a failed read changes nothing. The floor is
+  `LOCALS_MEMORY_FLOOR_PCT` (default 20% of RAM, a guess the manual check of the issue tunes; `0` turns it all off).
+  `/stats` and `locals status` show the budget now, the start budget, available memory and `pressure_trims`.
+  `cache_trims` still counts only GPU-limit trims. The stock engine's cache is unchanged.
 - **Each shape in the tuning file records its MLX version** (issue #31). The file-wide `__mlx__` and the `__stale__`
   list are gone: `__timed__` maps each timed shape to the MLX version it was timed under, and a shape is stale when
   that is not the running version. A shape with no recorded version, or one pinned after two crashes, is never stale.

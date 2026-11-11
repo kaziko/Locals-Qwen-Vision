@@ -25,6 +25,7 @@ from mlx_lm.models.cache import ArraysCache, BatchKVCache, BatchRotatingKVCache,
 from .engine import LocalsController, row_key, sample_each, sample_logits
 from .kernels import head_logits, packed_rows, text_model
 from .packed import NEG_INF, BatchEngine, BatchStats, Request, _common
+from . import sysmem
 
 
 def _merge(caches):
@@ -668,6 +669,12 @@ class HybridBatchEngine(BatchEngine):
         # GPU bytes the engine may use (0: no guard). Before a prefill, prompt-cache
         # entries are dropped if the prefill would not fit next to them.
         self.memory_limit = 0
+        # The prompt cache follows the memory macOS has available (issue #56; GLOSSARY.md "Cache budget", "Memory
+        # floor"): before each check of the guard the cache budget is min(start budget, cache bytes now + available
+        # bytes - floor). memory_floor 0: no such check (set by the service, from LOCALS_MEMORY_FLOOR_PCT).
+        self.memory_floor = 0
+        self.start_budget = 0
+        self.read_available = sysmem.available_bytes  # bytes, or None when unknown (then nothing changes)
         self._kv_tok = None
         self._kv_layers = 1
         self._row_bytes = None  # fixed state bytes per request (_row_state)
@@ -964,9 +971,27 @@ class HybridBatchEngine(BatchEngine):
             return
         self._trim_for(lru, (tokens * (1 + copies) + held) * self._kv_bytes_per_token() + self._admit_bytes(rows, tokens))
 
+    def _pressure_trim(self, lru) -> None:
+        """Set the prompt cache's budget from the memory macOS has available: min(start budget, cache bytes now +
+        available bytes - memory floor). A cache over it drops entries (least valuable first, as trim_to does)
+        and counts ``pressure_trims``; memory that comes back raises the budget again, never above the start
+        budget. An unknown reading changes nothing."""
+        if not self.memory_floor or lru is None:
+            return
+        avail = self.read_available()
+        if avail is None:
+            return
+        budget = max(0, min(self.start_budget, lru.nbytes + avail - self.memory_floor))
+        lru.max_bytes = budget
+        if lru.nbytes > budget:
+            lru.trim_to(n_bytes=budget)
+            mx.clear_cache()
+            self.counters["pressure_trims"] = self.counters.get("pressure_trims", 0) + 1
+
     def _trim_for(self, lru, need: int) -> None:
         """Drop prompt-cache entries (least valuable first) until ``need`` more
-        bytes fit under ``memory_limit``."""
+        bytes fit under ``memory_limit``, after the budget is set from the system's memory (_pressure_trim)."""
+        self._pressure_trim(lru)
         if not self.memory_limit or lru is None:
             return
         over = mx.get_active_memory() + need - self.memory_limit
