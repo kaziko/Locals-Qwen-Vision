@@ -1025,9 +1025,9 @@ def cmd_status(args) -> None:
                   f" (trimmed for memory {d.get('cache_trims', 0) or 0}x, requests held back {d.get('deferred', 0) or 0}x)")
         if d.get("prompt_cache_budget_mb") is not None:
             pct = d.get("memory_available_pct")
+            avail = "system memory available: unknown" if pct is None else f"system memory {pct}% available"
             print(f"{e}: cache budget {d['prompt_cache_budget_mb'] / 1e3:.1f} GB now, {d['prompt_cache_start_mb'] / 1e3:.1f} GB"
-                  f" at start; {'system memory available: unknown' if pct is None else f'system memory {pct}% available'}"
-                  f" (trimmed for system memory {d.get('pressure_trims', 0) or 0}x)")
+                  f" at start; {avail} (trimmed for system memory {d.get('pressure_trims', 0) or 0}x)")
     if m:
         print(f"GPU memory: {m['gpu_active_mb'] / 1e3:.1f} GB in use, peak {m['gpu_peak_mb'] / 1e3:.1f} GB")
 

@@ -189,21 +189,20 @@ def memory_plan(limit: int, weights: int) -> tuple:
     return pool, (int(float(env) * (1 << 30)) if env else pool + (512 << 20))
 
 
+MIN_CACHE_BYTES = int(1.5 * (1 << 30))  # the smallest prompt-cache budget (both engines)
+
+
 def cache_budget(limit: int, active: int, longest: int, cache_bytes: Optional[int] = None,
                  available: Optional[int] = None, floor: int = 0) -> int:
     """The prompt cache's start budget (GLOSSARY.md "Cache budget"). ``cache_bytes`` (--cache-gb) is used as it is.
-    Else: what is left of the GPU limit ``limit`` after ``active`` (the weights) and 5 GB for running rows and prefill,
-    and at least one conversation as long as fits (``longest``: its follow-up question then continues from it, 1.5 s
-    instead of 137 s at 60k tokens), 1.5 GiB to 16 GiB. With a memory ``floor`` and the system's ``available`` bytes
-    known (issue #56), it is also at most ``available - floor``, that cap winning over ``longest``, and never below
-    1.5 GiB. The memory guard empties the prompt cache for running rows as they need it."""
+    Else what the GPU limit leaves after the weights (``active``) and 5 GB for running rows and prefill, at least one
+    conversation as long as fits (``longest``: its follow-up question then continues from it, 1.5 s instead of 137 s
+    at 60k tokens), 1.5 GiB to 16 GiB, and with a memory ``floor`` at most ``available - floor`` (issue #56)."""
     if cache_bytes:
         return int(cache_bytes)
-    smallest = int(1.5 * (1 << 30))
-    free = limit - active - (5 << 30)
-    budget = min(max(free, longest, smallest), 16 << 30)
+    budget = min(max(limit - active - (5 << 30), longest, MIN_CACHE_BYTES), 16 << 30)
     if floor and available is not None:
-        budget = max(min(budget, available - floor), smallest)
+        budget = max(min(budget, available - floor), MIN_CACHE_BYTES)
     return int(budget)
 
 
@@ -393,7 +392,7 @@ class BatchService:
                                                for k, v in lru.stats_by_type().items()}
             except Exception:  # noqa: BLE001
                 pass
-            if eng is not None and hasattr(eng, "start_budget"):  # our engine: the budget follows system memory
+            if eng is not None:  # our engine (the stock engine sets no _eng): the budget follows system memory
                 from . import sysmem
 
                 avail, total = eng.read_available(), sysmem.physical_bytes()
@@ -754,11 +753,10 @@ class BatchService:
         # the memory the server leaves free for other apps (issue #56): the prompt cache's budget follows the
         # memory macOS has available, at start and at each check of the memory guard; LOCALS_MEMORY_FLOOR_PCT=0: off
         floor = sysmem.floor_bytes()
-        if self.cache_bytes is None:
-            active = mx.get_active_memory()  # (read before context_fit, as before issue #56)
-            longest = (self.context_fit() or 0) * eng._kv_bytes_per_token()
-            self.cache_bytes = cache_budget(limit, active, longest,
-                                            available=sysmem.available_bytes() if floor else None, floor=floor)
+        active = mx.get_active_memory()  # (read before context_fit, as before issue #56)
+        longest = (self.context_fit() or 0) * eng._kv_bytes_per_token()
+        self.cache_bytes = cache_budget(limit, active, longest, self.cache_bytes,
+                                        available=eng.read_available() if floor else None, floor=floor)
         eng.memory_floor, eng.start_budget = floor, self.cache_bytes
         lru = chain_cache(max_size=256, max_bytes=self.cache_bytes)
         self._lru = lru
@@ -1145,7 +1143,7 @@ class BatchService:
                                   prefill_batch_size=min(self.slots, 4), prefill_step_size=512)
 
         gen = new_gen()
-        lru = LRUPromptCache(max_size=256, max_bytes=self.cache_bytes or int(1.5 * (1 << 30)))
+        lru = LRUPromptCache(max_size=256, max_bytes=self.cache_bytes or MIN_CACHE_BYTES)
         self._lru = lru
         sampler = make_sampler(self.temp, top_p=self.top_p, top_k=self.top_k)
         live = {}

@@ -23,9 +23,7 @@ def _sysctl_int(name: str) -> Optional[int]:
         size = ctypes.c_size_t(ctypes.sizeof(buf))
         if _LIBC.sysctlbyname(name.encode(), ctypes.byref(buf), ctypes.byref(size), None, ctypes.c_size_t(0)) != 0:
             return None
-        if size.value == 4:
-            return buf.value & 0xFFFFFFFF
-        return buf.value if size.value == 8 else None
+        return buf.value if size.value in (4, 8) else None  # (a 4-byte value fills the low half: little-endian)
     except (OSError, AttributeError, TypeError):
         return None
 

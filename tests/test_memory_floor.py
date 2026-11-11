@@ -105,8 +105,13 @@ def _guard(start, floor, reading):
     from locals.hybrid_batch import HybridBatchEngine
 
     reads = []
+
+    def read():
+        reads.append(1)
+        return reading[0]
+
     e = SimpleNamespace(counters={}, snapshots={}, memory_limit=mx.get_active_memory() + (1 << 40),
-                        memory_floor=floor, start_budget=start, read_available=lambda: (reads.append(1), reading[0])[1])
+                        memory_floor=floor, start_budget=start, read_available=read)
     for name in ("_make_room", "_trim_for", "_pressure_trim"):
         setattr(e, name, getattr(HybridBatchEngine, name).__get__(e))
     e._kv_bytes_per_token = lambda: 0
@@ -182,10 +187,14 @@ def test_an_unknown_reading_neither_trims_nor_grows():
 
 
 def test_a_gpu_limit_trim_counts_only_cache_trims():
+    import gc
+
     import mlx.core as mx
 
     floor = 100 * M
     e, lru = _guard(8 * M, floor, [floor + (1 << 30)]), _lru(6, 8 * M)  # plenty of system memory
+    gc.collect()  # as the guard does first: arrays an earlier test left would be freed there and end the overshoot
+    mx.clear_cache()
     e.memory_limit = mx.get_active_memory() - 3 * M  # 3 MiB over the GPU limit
     e._make_room(lru, tokens=16, copies=0, held=0)
     assert lru.nbytes < 6 * M

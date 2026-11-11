@@ -669,9 +669,8 @@ class HybridBatchEngine(BatchEngine):
         # GPU bytes the engine may use (0: no guard). Before a prefill, prompt-cache
         # entries are dropped if the prefill would not fit next to them.
         self.memory_limit = 0
-        # The prompt cache follows the memory macOS has available (issue #56; GLOSSARY.md "Cache budget", "Memory
-        # floor"): before each check of the guard the cache budget is min(start budget, cache bytes now + available
-        # bytes - floor). memory_floor 0: no such check (set by the service, from LOCALS_MEMORY_FLOOR_PCT).
+        # The memory floor and the start budget, in bytes (issue #56; set by the service): see _pressure_trim.
+        # memory_floor 0: no check of system memory (LOCALS_MEMORY_FLOOR_PCT=0).
         self.memory_floor = 0
         self.start_budget = 0
         self.read_available = sysmem.available_bytes  # bytes, or None when unknown (then nothing changes)
@@ -976,7 +975,7 @@ class HybridBatchEngine(BatchEngine):
         available bytes - memory floor). A cache over it drops entries (least valuable first, as trim_to does)
         and counts ``pressure_trims``; memory that comes back raises the budget again, never above the start
         budget. An unknown reading changes nothing."""
-        if not self.memory_floor or lru is None:
+        if not self.memory_floor:
             return
         avail = self.read_available()
         if avail is None:
@@ -991,8 +990,10 @@ class HybridBatchEngine(BatchEngine):
     def _trim_for(self, lru, need: int) -> None:
         """Drop prompt-cache entries (least valuable first) until ``need`` more
         bytes fit under ``memory_limit``, after the budget is set from the system's memory (_pressure_trim)."""
+        if lru is None:
+            return
         self._pressure_trim(lru)
-        if not self.memory_limit or lru is None:
+        if not self.memory_limit:
             return
         over = mx.get_active_memory() + need - self.memory_limit
         if over > 0:
