@@ -972,10 +972,14 @@ class HybridBatchEngine(BatchEngine):
         """Whether a checkpoint's copy of a request's cache can be kept: the copy shares the request's KV
         buffers, so the request's next write copies them, and ``positions`` (its prompt) of KV then exist
         twice. Near the context limit that is past the GPU's memory; the copy is then left out (it is only
-        a prompt-cache entry)."""
+        a prompt-cache entry). With no GPU limit only the memory-floor check runs: the admission's bytes are
+        not needed (issue #61)."""
+        if not self.memory_limit:
+            self._trim_for(lru, 0)
+            return True
         need = positions * self._kv_bytes_per_token() + self._admit_bytes(0, PREFILL_TOKENS)
         self._trim_for(lru, need)
-        return not self.memory_limit or mx.get_active_memory() + need <= self.memory_limit
+        return mx.get_active_memory() + need <= self.memory_limit
 
     def _fits(self, lru, r, held: int, rows: int = 1, tokens: int = 0) -> bool:
         """Whether admitting ``r`` (its whole prompt uncached, at worst) can fit under ``memory_limit`` once the
@@ -995,8 +999,12 @@ class HybridBatchEngine(BatchEngine):
         ``tokens`` new prompt tokens plus ``copies`` checkpoint copies of them,
         ``held`` more positions (the merge into the running batch:
         _merge_tokens) and the prefill transient (attention scores, bounded by
-        PREFILL_SCORES)."""
+        PREFILL_SCORES). With no GPU limit only the memory-floor check runs
+        (issue #61)."""
         if lru is None:
+            return
+        if not self.memory_limit:
+            self._trim_for(lru, 0)
             return
         self._trim_for(lru, (tokens * (1 + copies) + held) * self._kv_bytes_per_token() + self._admit_bytes(rows, tokens))
 
