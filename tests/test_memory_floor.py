@@ -3,6 +3,7 @@
 shrinks below it, or grows back up to it, by the available memory less the memory floor."""
 
 import sys
+import time
 
 import pytest
 
@@ -112,7 +113,7 @@ def _guard(start, floor, reading):
         return reading[0]
 
     e = SimpleNamespace(counters={}, snapshots={}, memory_limit=mx.get_active_memory() + (1 << 40),
-                        memory_floor=floor, start_budget=start, read_available=read, _unseen=None)
+                        memory_floor=floor, start_budget=start, read_available=read, _unseen=None, _now=time.monotonic, _freed_at=None)
     for name in ("_make_room", "_trim_for", "_pressure_trim", "_budget", "_seen", "_note_freed", "_free_unused",
                  "_room_for_copy", "_growth_trim"):
         if hasattr(HybridBatchEngine, name):  # (a missing one fails where it is called)
@@ -273,6 +274,53 @@ def test_the_same_low_reading_cuts_the_shortfall_once():
     reading[0] = floor  # the reading caught up with the 5 MiB given back, and gained no more
     e._make_room(lru, tokens=16, copies=0, held=0)
     assert lru.nbytes == 1 * M and lru.max_bytes == 1 * M and e.counters == {"pressure_trims": 2}
+
+
+def test_memory_given_back_that_no_reading_shows_counts_only_for_a_while():
+    """macOS's reading can take in what the guard gives back and never rise by it (another app took the memory, or
+    macOS used it for something else): the guard then trusts the reading again after UNSEEN_S seconds, and does not
+    stay blind below the floor (issue #58 review)."""
+    from locals.hybrid_batch import UNSEEN_S
+
+    floor = 100 * M
+    reading = [floor - 4 * M]
+    e, lru = _guard(8 * M, floor, reading), _lru(6, 8 * M)
+    now = [0.0]
+    e._now = lambda: now[0]
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert lru.nbytes == 2 * M and e.counters == {"pressure_trims": 1}
+    now[0] = UNSEEN_S / 2  # the same reading soon after: the 4 MiB given back still count
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert lru.nbytes == 2 * M and e.counters == {"pressure_trims": 1}
+    now[0] = UNSEEN_S + 0.01  # still the same reading: the shortfall is real, and the rest of the cache goes
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert lru.nbytes == 0 and lru.max_bytes == 0 and e.counters == {"pressure_trims": 2}
+
+
+def test_checks_with_nothing_new_to_free_run_the_collector_once_a_step(monkeypatch):
+    """Below the floor with the prompt cache empty, an admission's checks (and a GPU-limit trim after the floor check
+    in the same call) found nothing to free but ran gc.collect() and emptied MLX's pool each time (issue #58 review):
+    once per step count is enough while MLX holds no more than after the last one."""
+    import gc
+
+    import mlx.core as mx
+
+    floor = 100 * M
+    e, lru = _guard(8 * M, floor, [floor - 4 * M]), _lru(0, 8 * M)
+    runs = []
+    monkeypatch.setattr(gc, "collect", lambda *a: runs.append(1))
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    e._room_for_copy(lru, 16)
+    e.memory_limit = mx.get_active_memory() - 1  # over the GPU limit too: _trim_for frees for it after the floor check
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert len(runs) == 1
+    e.counters["steps"] = 32  # the next growth check
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert len(runs) == 2
+    keep = mx.zeros((M // 4,))  # MLX holds more than after the last one: it may be garbage, so the collector runs
+    mx.eval(keep)
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert len(runs) == 3
 
 
 def test_the_buffer_pool_and_snapshots_go_before_prompt_cache_entries(monkeypatch):

@@ -1,7 +1,8 @@
 """The memory macOS has available to every app, for the prompt cache's budget (issue #56; GLOSSARY.md "Cache budget",
-"Memory floor"). ``kern.memorystatus_level`` is the percent of physical memory macOS counts as available. One ``available_bytes()`` took 1.96 us (32 GB Mac, the project venv's CPython, 10,000
-calls; triage timed the bare ``sysctlbyname`` read at about 1.7 us), so it is read at every check of the memory
-guard. Any failure reads as unknown (None): the caller then changes nothing."""
+"Memory floor"). ``kern.memorystatus_level`` is the percent of physical memory macOS counts as available. One
+``available_bytes()`` took 1.84 to 1.89 us (32 GB Mac, the project venv's CPython, two runs of ``python -m timeit
+-n 10000 -r 5 -s "from locals import sysmem; sysmem.available_bytes()" "sysmem.available_bytes()"``, best of 5), so it
+is read at every check of the memory guard. Any failure reads as unknown (None): the caller then changes nothing."""
 
 import ctypes
 import ctypes.util

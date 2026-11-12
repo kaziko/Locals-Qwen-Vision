@@ -25,6 +25,10 @@
   `sysmem.physical_bytes()`, with no `sysctl` subprocess (issue #58).
   The prompt cache drops the stale copies a new entry extends before the insert holds it to its budget, so with a
   tight budget it no longer evicts another conversation for room the stale copies held (issue #58).
+  After the review of issue #58: memory a trim gave back counts as available for 2 s at most (`UNSEEN_S`), as a
+  reading need never show it; before, the guard could stay blind below the floor. `gc.collect()` and
+  `mx.clear_cache()` run once per step count while MLX holds no more than after the last time. A disk snapshot
+  larger than the cache budget is not read (below the floor the budget can be 0).
 - **Each shape in the tuning file records its MLX version** (issue #31). The file-wide `__mlx__` and the `__stale__`
   list are gone: `__timed__` maps each timed shape to the MLX version it was timed under, and a shape is stale when
   that is not the running version. A shape with no recorded version, or one pinned after two crashes, is never stale.
