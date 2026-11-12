@@ -2773,10 +2773,11 @@ class HybridBatchEngine(BatchEngine):
                         [e["r"].prompt[:-1] for e in ready], [], starts=[(e.pop("cache"), []) for e in ready]), tp, count=False)
                     del ready
                 new = []
-                while queue and sum(not isinstance(r, _FreedSlot) for r in rows) + len(filling) + len(new) < self.n_slots:
+                running = sum(not isinstance(r, _FreedSlot) for r in rows)  # (a freed slot runs nothing)
+                while queue and running + len(filling) + len(new) < self.n_slots:
                     # a request that would not fit next to the running rows waits for one to finish
                     held0 = self._merge_tokens(rows, [len(e["r"].prompt) for e in filling] + [len(q.prompt) for q in new + [queue[0]]])
-                    if (rows or new or filling) and not self._fits(lru, queue[0], held0 + sum(len(q.prompt) for q in new),
+                    if (running or new or filling) and not self._fits(lru, queue[0], held0 + sum(len(q.prompt) for q in new),
                                                                    rows=len(new) + 1, tokens=sum(len(q.prompt) for q in new + [queue[0]])):
                         if not getattr(queue[0], "held", False):  # (once a request: while it waits, every step asks)
                             queue[0].held = True

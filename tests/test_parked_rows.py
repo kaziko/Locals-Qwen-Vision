@@ -212,6 +212,45 @@ def test_a_finished_rows_slot_waits_for_the_next_request(rt):
     assert counters.get("slots_reused", 0) == 1
 
 
+@pytest.mark.model
+def test_a_batch_of_only_freed_slots_does_not_hold_a_request_back(rt):
+    """Issue #59 review: when the last running row finishes and the batch keeps only freed slots (_FreedSlot), a
+    waiting request is admitted with nothing running, as a lone request always is: no memory check holds it back."""
+    from locals.engine import Controller
+    from locals.hybrid_batch import HybridBatchEngine
+    from locals.packed import Request
+
+    class Free(Controller):
+        eos_ids = []
+
+    eng = HybridBatchEngine(rt.model, rt.tokenizer, n_slots=2, share_prefix=False)
+    eng.parks = True
+    # (the second finishes two steps after the first: inside _SLOT_WAIT, so the first's slot is still held)
+    reqs = [Request(rt.encode_chat(p), Free(), n) for p, n in zip(PROMPTS, (14, 16, 8))]
+    for r in reqs:
+        r.pend, r.fed = [], []
+    idle = []  # for each memory check: whether no request was running then
+
+    def fits(lru, r, *a, **k):
+        if r is not reqs[2]:
+            return True
+        idle.append(all(q.finish for q in reqs[:2]))
+        return False  # (the third never fits next to a running row: it waits for both)
+
+    eng._fits = fits
+    sent = [False]
+
+    def source(block):
+        if sent[0]:
+            return []
+        sent[0] = True
+        return list(reqs)
+
+    eng.serve(source, temp=0.0)
+    assert reqs[2].finish == "length"
+    assert idle and not any(idle), idle  # (the check ran while rows ran, and never once both had finished)
+
+
 def test_an_image_rows_slot_in_place_keeps_its_rope_shift():
     """An image row's offset is its rope position, shifted by its M-RoPE delta (hybrid_batch._shift_rope), not its
     length: placed into a finished row's slot, all its keys are copied (its length read from its left padding), and
