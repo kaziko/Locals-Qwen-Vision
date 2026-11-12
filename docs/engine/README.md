@@ -468,7 +468,7 @@ Any other exception escapes `serve`, for example a Metal out-of-memory error. `B
 | `admissions` | Number of `attach` calls |
 | `idle_s` | Time spent blocked in `source(True)` |
 | `mixed_steps` | Mixed passes run |
-| `deferred` | Requests held back for memory (each counted once, however many steps it waits) |
+| `deferred` | Requests held back for memory, under the GPU limit or the memory floor (each counted once, however many steps it waits) |
 | `cache_trims` | Times `_trim_for` evicted prompt-cache entries for the GPU limit |
 | `pressure_trims` | Times `_pressure_trim` evicted prompt-cache entries because system memory was below the memory floor |
 | `solo_steps`, `drafted` | Steps of a request alone (`_solo`), and the draft tokens they kept |

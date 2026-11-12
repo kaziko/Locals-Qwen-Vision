@@ -984,13 +984,21 @@ class HybridBatchEngine(BatchEngine):
     def _fits(self, lru, r, held: int, rows: int = 1, tokens: int = 0) -> bool:
         """Whether admitting ``r`` (its whole prompt uncached, at worst) can fit under ``memory_limit`` once the
         prompt cache is emptied, with ``rows`` new requests in all (``r`` and those admitted with it) whose
-        prompts, ``tokens`` of them, are read together."""
+        prompts, ``tokens`` of them, are read together. And whether it keeps the memory macOS has available (_seen) at
+        or above ``memory_floor`` once the prompt cache and MLX's pool of freed buffers could be given back (issue #59:
+        _make_room then gives back the cache entries it needs there). Like the GPU check, it counts every cache entry,
+        though an entry that shares its buffers with a running row frees nothing. Floor 0 or an unknown reading: only
+        the GPU limit decides. No GPU limit: no estimate is made (issue #61), and the request fits."""
         if not self.memory_limit:
             return True
         copies = _copies(r)
         need = ((len(r.prompt) * (1 + copies) + held) * self._kv_bytes_per_token()
                 + self._admit_bytes(rows, tokens or len(r.prompt)) + _replies(r) * self._reply_bytes)
-        return need <= self.memory_limit - (mx.get_active_memory() - (lru.nbytes if lru is not None else 0))
+        cached = lru.nbytes if lru is not None else 0
+        if need > self.memory_limit - (mx.get_active_memory() - cached):
+            return False
+        raw = self.read_available() if self.memory_floor else None
+        return raw is None or need <= self._seen(raw) + cached + mx.get_cache_memory() - self.memory_floor
 
     def _make_room(self, lru, tokens: int, copies: int, held: int, rows: int = 1) -> None:
         """Drop least-valuable prompt-cache entries until an admission fits under
@@ -999,14 +1007,17 @@ class HybridBatchEngine(BatchEngine):
         ``tokens`` new prompt tokens plus ``copies`` checkpoint copies of them,
         ``held`` more positions (the merge into the running batch:
         _merge_tokens) and the prefill transient (attention scores, bounded by
-        PREFILL_SCORES). With no GPU limit only the memory-floor check runs
-        (issue #61)."""
+        PREFILL_SCORES). The same bytes are given back below the memory floor
+        (_pressure_trim's ``need``): _fits counted the cache as memory to give
+        back there (issue #59). With no GPU limit only the memory-floor check
+        runs (issue #61)."""
         if lru is None:
             return
         if not self.memory_limit:
             self._trim_for(lru, 0)
             return
-        self._trim_for(lru, (tokens * (1 + copies) + held) * self._kv_bytes_per_token() + self._admit_bytes(rows, tokens))
+        need = (tokens * (1 + copies) + held) * self._kv_bytes_per_token() + self._admit_bytes(rows, tokens)
+        self._trim_for(lru, need, floor_need=need)
 
     def _budget(self, lru, avail: int, adding: int = 0) -> int:
         """The cache budget for ``avail`` bytes available (_seen): min(start budget, cache bytes now + ``adding`` (an
@@ -1058,10 +1069,11 @@ class HybridBatchEngine(BatchEngine):
         finally:
             self._freed_at = (step, _mlx_held())
 
-    def _pressure_trim(self, lru, adding: int = 0) -> None:
+    def _pressure_trim(self, lru, adding: int = 0, need: int = 0) -> None:
         """Set the prompt cache's budget from the memory macOS has available (_budget); ``adding``: the bytes of an
         entry about to go in whose buffers are in use already (a lone row's retire moves them as they are), so it
-        does not push out older entries, or itself. Below the floor, what costs no entry goes first (_free_unused),
+        does not push out older entries, or itself. ``need``: bytes an admission is about to take (_make_room),
+        counted as taken already, so the cache gives back what they would put below the floor (issue #59). Below the floor, what costs no entry goes first (_free_unused),
         then entries least valuable first (as trim_to does), counting ``pressure_trims``; what that gives back counts
         as available until a reading shows it (_seen). Memory that comes back raises the budget again, never above the
         start budget. An unknown reading changes nothing."""
@@ -1070,7 +1082,7 @@ class HybridBatchEngine(BatchEngine):
         raw = self.read_available()
         if raw is None:
             return
-        if self._seen(raw) < self.memory_floor:
+        if self._seen(raw) - need < self.memory_floor:
             held = _mlx_held()
 
             def short():
@@ -1080,24 +1092,25 @@ class HybridBatchEngine(BatchEngine):
                 held = now
                 again = self.read_available()
                 raw = raw if again is None else again
-                return self._seen(raw) < self.memory_floor
+                return self._seen(raw) - need < self.memory_floor
 
             self._free_unused(short)
-        budget = self._budget(lru, self._seen(raw), adding)
+        budget = self._budget(lru, self._seen(raw) - need, adding)
         lru.max_bytes = budget
-        if self._seen(raw) < self.memory_floor and lru.nbytes + adding > budget:
+        if self._seen(raw) - need < self.memory_floor and lru.nbytes + adding > budget:
             n = lru.nbytes
             lru.trim_to(n_bytes=max(0, budget - adding))
             mx.clear_cache()
             self._note_freed(raw, n - lru.nbytes)
             self.counters["pressure_trims"] = self.counters.get("pressure_trims", 0) + 1
 
-    def _trim_for(self, lru, need: int) -> None:
+    def _trim_for(self, lru, need: int, floor_need: int = 0) -> None:
         """Drop prompt-cache entries (least valuable first) until ``need`` more
-        bytes fit under ``memory_limit``, after the budget is set from the system's memory (_pressure_trim)."""
+        bytes fit under ``memory_limit``, after the budget is set from the system's memory (_pressure_trim, with
+        ``floor_need`` bytes about to be taken: only an admission's, as other callers insert what they take)."""
         if lru is None:
             return
-        self._pressure_trim(lru)
+        self._pressure_trim(lru, need=floor_need)
         if not self.memory_limit:
             return
 

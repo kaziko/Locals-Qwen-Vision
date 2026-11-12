@@ -566,7 +566,7 @@ Variables read by the server process must be set in the environment of the comma
 | `LOCALS_DISK_CACHE` | `1` | `0` turns off the system-prompt snapshots on disk, which survive server restarts. | `service.BatchService._run_locals` |
 | `LOCALS_DISK_CACHE_DIR` | `~/.cache/locals/prompts` | Where those snapshots go. | `service.BatchService._run_locals` |
 | `LOCALS_DISK_CACHE_GB` | `4` | Their size limit. | `service.BatchService._run_locals` |
-| `LOCALS_MEMORY_FLOOR_PCT` | `20` | Memory (percent of RAM) the server leaves free for other apps: the prompt cache shrinks when macOS has less available, and grows back up to its start budget. `0` turns this off. | `sysmem.floor_pct`, `hybrid_batch.HybridBatchEngine._pressure_trim` |
+| `LOCALS_MEMORY_FLOOR_PCT` | `20` | Memory (percent of RAM) the server leaves free for other apps: the prompt cache shrinks when macOS has less available, and grows back up to its start budget; a new request waits while others run if starting it would put available memory below the floor. `0` turns this off. | `sysmem.floor_pct`, `hybrid_batch.HybridBatchEngine._pressure_trim` |
 | `LOCALS_ORIGINS` | empty | Extra browser origins allowed to call the server (comma-separated, `*` for any). | `server._origin_ok` |
 | `LOCALS_HOSTS` | empty | Extra `Host` header names accepted, against DNS rebinding (comma-separated, `*`). | `server._host_ok` |
 | `LOCALS_DEBUG` | unset | Saves every request as received. | `server.Server.prepare`, `server.Server.prepare_text`, `server.make_handler.Handler._other_api` |

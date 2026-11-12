@@ -29,6 +29,10 @@
   reading need never show it; before, the guard could stay blind below the floor. `gc.collect()` and
   `mx.clear_cache()` run once per step count while MLX holds no more than after the last time. A disk snapshot
   larger than the cache budget is not read (below the floor the budget can be 0).
+  Admission also checks the floor (issue #59): while other rows run, a request waits (`deferred`) if its estimate
+  would put available memory below the floor once the prompt cache and MLX's pool are given back; an admitted
+  request's room is then made in the cache before its prefill. A request with nothing running is still admitted.
+  Floor 0 or no GPU limit: no check; an unknown reading passes it.
 - **Each shape in the tuning file records its MLX version** (issue #31). The file-wide `__mlx__` and the `__stale__`
   list are gone: `__timed__` maps each timed shape to the MLX version it was timed under, and a shape is stale when
   that is not the running version. A shape with no recorded version, or one pinned after two crashes, is never stale.
