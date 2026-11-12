@@ -1073,16 +1073,20 @@ class HybridBatchEngine(BatchEngine):
         """Set the prompt cache's budget from the memory macOS has available (_budget); ``adding``: the bytes of an
         entry about to go in whose buffers are in use already (a lone row's retire moves them as they are), so it
         does not push out older entries, or itself. ``need``: bytes an admission is about to take (_make_room),
-        counted as taken already, so the cache gives back what they would put below the floor (issue #59). Below the floor, what costs no entry goes first (_free_unused),
-        then entries least valuable first (as trim_to does), counting ``pressure_trims``; what that gives back counts
-        as available until a reading shows it (_seen). Memory that comes back raises the budget again, never above the
-        start budget. An unknown reading changes nothing."""
+        counted as taken already, so the cache gives back what they would put below the floor (issue #59). Below the
+        floor, what costs no entry goes first (_free_unused), then entries least valuable first (as trim_to does),
+        counting ``pressure_trims``; what that gives back counts as available until a reading shows it (_seen). Memory
+        that comes back raises the budget again, never above the start budget. An unknown reading changes nothing."""
         if not self.memory_floor:
             return
         raw = self.read_available()
         if raw is None:
             return
-        if self._seen(raw) - need < self.memory_floor:
+
+        def avail():  # (each call: the latest reading, and what _seen counts given back by then)
+            return self._seen(raw) - need
+
+        if avail() < self.memory_floor:
             held = _mlx_held()
 
             def short():
@@ -1092,12 +1096,12 @@ class HybridBatchEngine(BatchEngine):
                 held = now
                 again = self.read_available()
                 raw = raw if again is None else again
-                return self._seen(raw) - need < self.memory_floor
+                return avail() < self.memory_floor
 
             self._free_unused(short)
-        budget = self._budget(lru, self._seen(raw) - need, adding)
+        budget = self._budget(lru, avail(), adding)
         lru.max_bytes = budget
-        if self._seen(raw) - need < self.memory_floor and lru.nbytes + adding > budget:
+        if avail() < self.memory_floor and lru.nbytes + adding > budget:
             n = lru.nbytes
             lru.trim_to(n_bytes=max(0, budget - adding))
             mx.clear_cache()
@@ -1107,7 +1111,8 @@ class HybridBatchEngine(BatchEngine):
     def _trim_for(self, lru, need: int, floor_need: int = 0) -> None:
         """Drop prompt-cache entries (least valuable first) until ``need`` more
         bytes fit under ``memory_limit``, after the budget is set from the system's memory (_pressure_trim, with
-        ``floor_need`` bytes about to be taken: only an admission's, as other callers insert what they take)."""
+        ``floor_need`` bytes about to be taken: only an admission passes them. A retire and a copy insert what they
+        take, which the budget counts already; the running rows' growth is left to the next check)."""
         if lru is None:
             return
         self._pressure_trim(lru, need=floor_need)
