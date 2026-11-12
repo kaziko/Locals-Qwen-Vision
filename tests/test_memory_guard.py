@@ -224,7 +224,7 @@ def test_growth_trim_runs_while_a_request_waits(service, monkeypatch):
     monkeypatch.setattr(eng, "memory_limit", mx.get_active_memory() + (8 << 30))
     calls, seen = [], [0]
     orig = eng._trim_for
-    monkeypatch.setattr(eng, "_trim_for", lambda lru, need: (calls.append(need), orig(lru, need))[1])
+    monkeypatch.setattr(eng, "_trim_for", lambda lru, need, **k: (calls.append(need), orig(lru, need, **k))[1])
     tok = service.tokenizer
     jobs = [service.submit(tok.encode("Count from one to one thousand."), max_tokens=500, ignore_eos=True,
                            on_token=lambda t: seen.__setitem__(0, seen[0] + len(t)))]
@@ -265,3 +265,28 @@ def test_a_prompt_read_alone_stops_when_its_client_goes(service):
     long_.wait(600)
     assert long_.finish == "cancelled" and time.time() - t0 < 6, time.time() - t0
     assert eng.counters.get("prefills_given_up", 0) == gave_up + 1
+
+
+@pytest.mark.model
+def test_below_the_floor_requests_wait_for_the_running_ones_and_all_finish(service, monkeypatch):
+    """Issue #59: with plenty of room under the GPU limit but system memory below the floor, a request waits while
+    others run, and one that is alone still starts: all four finish, admitted one at a time."""
+    eng = service._eng
+    tok = service.tokenizer
+    service.submit(tok.encode("Hello"), max_tokens=2).wait(600)
+    avail = eng.read_available()
+    if avail is None:
+        pytest.skip("system memory unreadable here: the floor check passes on an unknown reading")
+    monkeypatch.setattr(eng, "memory_limit", mx.get_active_memory() + (8 << 30))
+    # the guard below the floor sets the cache budget to 0 and counts memory given back: both restored afterwards
+    monkeypatch.setattr(service._lru, "max_bytes", service._lru.max_bytes)
+    monkeypatch.setattr(eng, "_unseen", None)
+    monkeypatch.setattr(eng, "memory_floor", avail + (64 << 30))  # always below it
+    before = dict(eng.counters)
+    jobs = [service.submit(tok.encode(p), max_tokens=8, ignore_eos=True)
+            for p in ("Why is the sky blue?", "What is a prime number?", "Name a planet.", "What does a compiler do?")]
+    for j in jobs:
+        j.wait(900)
+    assert all(len(j.tokens) == 8 for j in jobs)
+    assert eng.counters["admissions"] - before.get("admissions", 0) == 4
+    assert eng.counters.get("deferred", 0) - before.get("deferred", 0) == 3

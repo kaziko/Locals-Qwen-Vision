@@ -128,9 +128,9 @@ def _lru(n, start):
     return lru
 
 
-def _guard(start, floor, reading):
-    """The engine's memory guard, with a GPU limit no admission comes near and a fake system-memory reader that
-    returns ``reading[0]``."""
+def _guard(start, floor, reading, kv=0):
+    """The engine's memory guard, with a GPU limit no admission comes near, ``kv`` bytes of KV per token and a fake
+    system-memory reader that returns ``reading[0]``."""
     from types import SimpleNamespace
 
     import mlx.core as mx
@@ -144,12 +144,13 @@ def _guard(start, floor, reading):
         return reading[0]
 
     e = SimpleNamespace(counters={}, snapshots={}, memory_limit=mx.get_active_memory() + (1 << 40),
-                        memory_floor=floor, start_budget=start, read_available=read, _unseen=None, _now=time.monotonic, _freed_at=None)
+                        memory_floor=floor, start_budget=start, read_available=read, _unseen=None, _now=time.monotonic, _freed_at=None,
+                        _reply_bytes=0)
     for name in ("_make_room", "_trim_for", "_pressure_trim", "_budget", "_seen", "_note_freed", "_free_unused",
-                 "_room_for_copy", "_growth_trim"):
+                 "_room_for_copy", "_growth_trim", "_fits"):
         if hasattr(HybridBatchEngine, name):  # (a missing one fails where it is called)
             setattr(e, name, getattr(HybridBatchEngine, name).__get__(e))
-    e._kv_bytes_per_token = lambda: 0
+    e._kv_bytes_per_token = lambda: kv
     e._admit_bytes = lambda rows, tokens: 0
     e.reads = reads
     _settle()  # (what earlier tests left, freed by the guard's first step, would count as memory given back)
@@ -471,9 +472,69 @@ def test_without_a_gpu_limit_the_guard_does_no_admission_arithmetic():
         e._admit_bytes = lambda rows, tokens: asked.append("admit") or 0
         e._kv_bytes_per_token = lambda: asked.append("kv") or 0
         _settle()
+        assert e._fits(lru, _request(16), held=0) and e.reads == []
         e._make_room(lru, tokens=16, copies=0, held=0)
         assert e._room_for_copy(lru, 16) is True
         assert asked == []
         # the memory-floor check runs all the same where it is on (floor 0: it reads nothing)
         assert lru.nbytes == (5 * M if floor else 6 * M)
         assert e.counters == ({"pressure_trims": 1} if floor else {}) and bool(e.reads) == bool(floor)
+
+
+def _request(tokens):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(prompt=[1] * tokens, checkpoints=[])
+
+
+def test_admission_waits_when_it_would_put_system_memory_below_the_floor():
+    """Issue #59: a request that fits under the GPU limit still waits when admitting it would put the memory macOS
+    has available below the floor. The prompt cache counts as memory that can be given back (below the floor the
+    guard empties it)."""
+    floor = 100 * M
+    reading = [floor + 10 * M]
+    e = _guard(8 * M, floor, reading, kv=20 * 1024)  # a 1,024-token prompt: 20 MiB of KV
+    r = _request(1024)
+    assert not e._fits(None, r, held=0)  # 10 MiB above the floor, 20 MiB needed
+    reading[0] = floor + 30 * M
+    assert e._fits(None, r, held=0)
+    reading[0] = floor - 10 * M
+    lru = _lru(40, 64 * M)  # 40 MiB of prompt cache
+    _settle()
+    assert e._fits(lru, r, held=0)  # 40 - 10 MiB can be given back: room for 20
+    reading[0] = floor - 30 * M
+    assert not e._fits(lru, r, held=0)  # 40 - 30 MiB: not
+
+
+def test_admission_ignores_the_floor_when_it_is_off_or_the_reading_is_unknown():
+    """Floor 0 (LOCALS_MEMORY_FLOOR_PCT=0): admission never reads system memory. An unknown reading: only the GPU
+    limit decides. (No GPU limit: test_without_a_gpu_limit_the_guard_does_no_admission_arithmetic.)"""
+    r = _request(1024)
+    e = _guard(8 * M, 0, [0], kv=20 * 1024)  # nothing available, but the check is off
+    assert e._fits(None, r, held=0) and e.reads == []
+    e = _guard(8 * M, 100 * M, [None], kv=20 * 1024)
+    assert e._fits(None, r, held=0) and e.reads == [1]
+
+
+def test_an_admission_that_fits_above_the_floor_makes_its_room_there():
+    """Issue #59 review: _fits counts the prompt cache as memory to give back, so the admission's _make_room gives
+    back what the request needs below the floor, though the reading is still above it (it did nothing there, and
+    the prefill took available memory below the floor until the next check)."""
+    floor = 100 * M
+    reading = [floor + 5 * M]
+    e = _guard(64 * M, floor, reading, kv=20 * 1024)  # a 1,024-token prompt: 20 MiB of KV
+    lru = _lru(40, 64 * M)
+    _settle()
+    assert e._fits(lru, _request(1024), held=0)
+    e._make_room(lru, tokens=1024, copies=0, held=0)
+    assert lru.nbytes <= 40 * M + 5 * M - 20 * M and lru.max_bytes <= 25 * M
+    assert e.counters == {"pressure_trims": 1}
+
+
+def test_the_gpu_limit_check_comes_first():
+    """A request that does not fit under the GPU limit waits whatever system memory reads, and nothing is read."""
+    import mlx.core as mx
+
+    e = _guard(8 * M, 100 * M, [100 * M + (1 << 40)], kv=20 * 1024)  # far above the floor
+    e.memory_limit = mx.get_active_memory() + 10 * M  # 10 MiB under the GPU limit, 20 MiB needed
+    assert not e._fits(None, _request(1024), held=0) and e.reads == []

@@ -21,7 +21,7 @@ The cache budget the server starts with: the size the user set, or else what the
 _Avoid_: initial size, max cache
 
 **Memory floor**:
-The share of the Mac's memory the server leaves free for other apps. When less than that is free, the prompt cache gives memory back.
+The share of the Mac's memory the server leaves free for other apps. When less than that is free, the prompt cache gives memory back. A new request also waits while others run if starting it would leave less than that free.
 _Avoid_: memory margin, reserve, headroom
 
 **Draft**:
