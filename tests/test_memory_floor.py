@@ -44,7 +44,8 @@ FLOOR = 6871947673  # 20% of 32 GiB
 
 def test_start_budget_without_cache_gb_is_the_formula_whatever_system_memory_reads(monkeypatch):
     """Issue #58: the start budget is what the GPU limit leaves free at start, 1.5 GiB to 16 GiB; available system
-    memory and the floor do not change it (the guard caps the budget at run time, and it grows back to this)."""
+    memory and the floor do not change it (the guard caps the budget at run time, and it grows back to this). This
+    checks the formula only: that the service does not cap it at start is the next test (issue #61)."""
     from locals.service import cache_budget
 
     monkeypatch.setattr(sysmem, "available_bytes", lambda: 1 * G)  # far below any floor
@@ -55,6 +56,36 @@ def test_start_budget_without_cache_gb_is_the_formula_whatever_system_memory_rea
     assert cache_budget(LIMIT, 12 * G, 9 * G) == 9 * G  # one conversation as long as fits
     assert cache_budget(LIMIT, 12 * G, 20 * G) == 16 * G  # (still at most 16 GiB)
     assert cache_budget(LIMIT, 22 * G, 0) == 1610612736  # 1.5 GiB at least
+
+
+@pytest.mark.model
+def test_a_service_started_below_the_floor_keeps_the_formula_start_budget(monkeypatch):
+    """Issue #61: the test above checks the formula; this one checks the service. A server started while system memory
+    reads far below the floor gets the formula's start budget as its engine's start budget and its prompt cache's
+    budget: a start cap brought back in BatchService setup (through eng.read_available or sysmem) fails here."""
+    from huggingface_hub import snapshot_download
+
+    from locals import service as svc_mod
+
+    model = "mlx-community/Qwen3.5-4B-MLX-4bit"
+    try:
+        snapshot_download(model, local_files_only=True)
+    except Exception:  # noqa: BLE001
+        pytest.skip("Qwen3.5-4B not cached")
+    monkeypatch.setenv("LOCALS_DISK_CACHE", "0")  # (no system prompts written to this user's disk cache)
+    monkeypatch.delenv("LOCALS_MEMORY_FLOOR_PCT", raising=False)
+    monkeypatch.setattr(sysmem, "available_bytes", lambda: 1 * G)  # the engine's read_available, from its start
+    made = []
+    formula = svc_mod.cache_budget
+    monkeypatch.setattr(svc_mod, "cache_budget", lambda *a, **k: made.append(formula(*a, **k)) or made[-1])
+    svc = svc_mod.BatchService("locals", model, slots=16, temp=0.0)
+    try:
+        eng = svc._eng
+        assert eng.read_available() == 1 * G and eng.memory_floor > 1 * G  # the reading is below the floor
+        assert len(made) == 1 and made[0] >= 1610612736  # the formula's 1.5 GiB at least
+        assert eng.start_budget == made[0] and svc._lru.max_bytes == made[0]
+    finally:
+        svc.close()
 
 
 def test_the_floor_in_bytes_follows_the_setting(monkeypatch):
@@ -428,3 +459,21 @@ def test_a_server_started_in_low_memory_is_capped_at_the_first_check_and_grows_b
     reading[0] = floor + start + G  # memory came back
     e._make_room(lru, tokens=16, copies=0, held=0)
     assert lru.max_bytes == start
+
+
+def test_without_a_gpu_limit_the_guard_does_no_admission_arithmetic():
+    """Issue #61: an engine with no GPU limit (siblings, fields, blocks, tests) never needs an admission's bytes:
+    _trim_for throws them away. _admit_bytes calls _row_state, which runs a one-token pass on its first call."""
+    asked = []
+    for floor, reading in ((0, [0]), (100 * M, [100 * M - 1 * M])):
+        e, lru = _guard(8 * M, floor, reading), _lru(6, 8 * M)
+        e.memory_limit = 0
+        e._admit_bytes = lambda rows, tokens: asked.append("admit") or 0
+        e._kv_bytes_per_token = lambda: asked.append("kv") or 0
+        _settle()
+        e._make_room(lru, tokens=16, copies=0, held=0)
+        assert e._room_for_copy(lru, 16) is True
+        assert asked == []
+        # the memory-floor check runs all the same where it is on (floor 0: it reads nothing)
+        assert lru.nbytes == (5 * M if floor else 6 * M)
+        assert e.counters == ({"pressure_trims": 1} if floor else {}) and bool(e.reads) == bool(floor)
