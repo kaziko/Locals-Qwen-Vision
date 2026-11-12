@@ -633,7 +633,7 @@ To re-tune from scratch, stop every Locals server, delete the cache files (every
 
 `ALIASES` maps more names onto these: `qwen` and `qwen3.5` to the 4B; `gemma`, `gemma4`, `gemma-4`, `gemma4-e4b` and `gemma-4-e4b-it` to Gemma 4 E4B; `gemma4-e2b`, `gemma-4-e2b-it` and `gemma4-e2b-it` to Gemma 4 E2B; `lfm` and `lfm2.5`; `lfm3`; `minicpm` and `minicpm5` (`defaults.py`).
 
-- **`default_model()`** reads the Mac's memory with `sysctl -n hw.memsize`. It picks `qwen3.5-2b` when memory is known and below 12 GB, and `qwen3.5-4b` otherwise, including when memory is unknown (`defaults.memory_gb`, `defaults.default_model`). The 4B (3 GB of weights, 64k context) and its prompt cache do not fit next to macOS in 8 GB. `DEFAULT_MODEL` is computed once, at import (`defaults.py`).
+- **`default_model()`** reads the Mac's memory (`hw.memsize`, `sysmem.physical_bytes`). It picks `qwen3.5-2b` when memory is known and below 12 GB, and `qwen3.5-4b` otherwise, including when memory is unknown (`defaults.memory_gb`, `defaults.default_model`). The 4B (3 GB of weights, 64k context) and its prompt cache do not fit next to macOS in 8 GB. `DEFAULT_MODEL` is computed once, at import (`defaults.py`).
 - **`model_id(name)`** resolves a `--model` value; every command uses it as the argparse `type` (for example `server.main`). Resolution order (`defaults.model_id`):
   1. A short name or alias, matched case-insensitively, becomes its repository; so does an Ollama name of one (`qwen3.5:4b`, `gemma4:e4b`: `:` becomes `-`, and `:latest` is dropped). A short name wins over a folder of the same name in the current directory.
   2. An existing path becomes its absolute path, because the background server runs elsewhere and later commands may run from other folders. Symlinks are kept.

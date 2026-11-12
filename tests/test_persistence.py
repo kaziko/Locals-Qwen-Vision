@@ -117,3 +117,20 @@ def test_each_port_has_its_own_server_log(tmp_path, monkeypatch):
     and a rotation left the other server writing into a deleted file."""
     monkeypatch.setattr(app, "LOCALS_DIR", tmp_path)
     assert app._log_file(8321) == tmp_path / "server.log" and app._log_file(8342) == tmp_path / "server-8342.log"
+
+
+def test_a_snapshot_the_cache_budget_cannot_hold_is_not_read(tmp_path, monkeypatch):
+    """Below the memory floor the cache budget can be 0: a snapshot read from disk then went into the cache and out
+    again at once, and each admission read it again while memory was short (issue #58 review)."""
+    import mlx_lm.models.cache as mc
+
+    from locals.hybrid_batch import chain_cache
+
+    d = DiskPromptCache(tmp_path / "m", 1.0)
+    d.save([1, 2, 3], _cache())
+    loads, load = [], mc.load_prompt_cache
+    monkeypatch.setattr(mc, "load_prompt_cache", lambda path: loads.append(path) or load(path))
+    lru = chain_cache(max_size=8, max_bytes=0)
+    assert d.restore(lru, "m", [1, 2, 3, 4]) == 0 and loads == [] and len(lru) == 0
+    lru.max_bytes = 1 << 20  # memory came back
+    assert d.restore(lru, "m", [1, 2, 3, 4]) == 3 and len(loads) == 1 and len(lru) == 1

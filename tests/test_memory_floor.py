@@ -1,8 +1,9 @@
-"""Issue #56: the prompt cache follows the memory macOS has available. The cache budget (GLOSSARY.md) is capped at
-start by the available system memory less the memory floor, and before each admission it shrinks, or grows back up
-to the start budget, by the same rule."""
+"""Issue #56: the prompt cache follows the memory macOS has available. The start budget is the plain formula (or
+--cache-gb; issue #58: system memory does not change it), and at each check of the memory guard the cache budget
+shrinks below it, or grows back up to it, by the available memory less the memory floor."""
 
 import sys
+import time
 
 import pytest
 
@@ -41,18 +42,19 @@ LIMIT = 26800603136  # max_recommended_working_set_size of a 32 GB Mac (issue #5
 FLOOR = 6871947673  # 20% of 32 GiB
 
 
-def test_start_budget_without_cache_gb_is_capped_by_available_memory_but_not_below_1_5_gib():
+def test_start_budget_without_cache_gb_is_the_formula_whatever_system_memory_reads(monkeypatch):
+    """Issue #58: the start budget is what the GPU limit leaves free at start, 1.5 GiB to 16 GiB; available system
+    memory and the floor do not change it (the guard caps the budget at run time, and it grows back to this)."""
     from locals.service import cache_budget
 
-    # today's formula: free = 26.8 GB - 3 GiB active - 5 GiB = 18.2 GB, capped at 16 GiB
+    monkeypatch.setattr(sysmem, "available_bytes", lambda: 1 * G)  # far below any floor
+    # free = 26.8 GB - 3 GiB active - 5 GiB = 18.2 GB, capped at 16 GiB
     assert cache_budget(LIMIT, 3 * G, 0) == 16 * G
-    assert cache_budget(LIMIT, 3 * G, 0, available=10 * G, floor=FLOOR) == 3865470567  # 10 GiB - floor
-    assert cache_budget(LIMIT, 3 * G, 8 * G, available=10 * G, floor=FLOOR) == 3865470567  # wins over the longest one
-    assert cache_budget(LIMIT, 3 * G, 0, available=7 * G, floor=FLOOR) == 1610612736  # 1.5 GiB at least
-    assert cache_budget(LIMIT, 3 * G, 0, available=None, floor=FLOOR) == 16 * G  # unknown: as today
-    assert cache_budget(LIMIT, 3 * G, 0, available=7 * G, floor=0) == 16 * G  # floor 0: off, as today
     # below the 16 GiB cap: free = 26.8 GB - 12 GiB - 5 GiB
-    assert cache_budget(LIMIT, 12 * G, 0, available=7 * G, floor=0) == 8546992128
+    assert cache_budget(LIMIT, 12 * G, 0) == 8546992128
+    assert cache_budget(LIMIT, 12 * G, 9 * G) == 9 * G  # one conversation as long as fits
+    assert cache_budget(LIMIT, 12 * G, 20 * G) == 16 * G  # (still at most 16 GiB)
+    assert cache_budget(LIMIT, 22 * G, 0) == 1610612736  # 1.5 GiB at least
 
 
 def test_the_floor_in_bytes_follows_the_setting(monkeypatch):
@@ -69,8 +71,8 @@ def test_the_floor_in_bytes_follows_the_setting(monkeypatch):
 def test_start_budget_with_cache_gb_is_exactly_that():
     from locals.service import cache_budget
 
-    assert cache_budget(LIMIT, 3 * G, 0, cache_bytes=4 * G, available=7 * G, floor=FLOOR) == 4 * G
-    assert cache_budget(LIMIT, 3 * G, 0, cache_bytes=20 * G, available=64 * G, floor=FLOOR) == 20 * G
+    assert cache_budget(LIMIT, 3 * G, 0, cache_bytes=4 * G) == 4 * G
+    assert cache_budget(LIMIT, 3 * G, 0, cache_bytes=20 * G) == 20 * G
 
 
 M = 1 << 20
@@ -111,7 +113,7 @@ def _guard(start, floor, reading):
         return reading[0]
 
     e = SimpleNamespace(counters={}, snapshots={}, memory_limit=mx.get_active_memory() + (1 << 40),
-                        memory_floor=floor, start_budget=start, read_available=read, _unseen=None)
+                        memory_floor=floor, start_budget=start, read_available=read, _unseen=None, _now=time.monotonic, _freed_at=None)
     for name in ("_make_room", "_trim_for", "_pressure_trim", "_budget", "_seen", "_note_freed", "_free_unused",
                  "_room_for_copy", "_growth_trim"):
         if hasattr(HybridBatchEngine, name):  # (a missing one fails where it is called)
@@ -169,7 +171,7 @@ def test_cache_gb_is_a_hard_cap_that_low_memory_still_goes_below():
     from locals.service import cache_budget
 
     floor = 100 * M
-    start = cache_budget(LIMIT, 3 * G, 0, cache_bytes=4 * M, available=floor + G, floor=floor)
+    start = cache_budget(LIMIT, 3 * G, 0, cache_bytes=4 * M)
     assert start == 4 * M
     reading = [floor + (64 << 30)]
     e, lru = _guard(start, floor, reading), _lru(3, start)
@@ -274,6 +276,53 @@ def test_the_same_low_reading_cuts_the_shortfall_once():
     assert lru.nbytes == 1 * M and lru.max_bytes == 1 * M and e.counters == {"pressure_trims": 2}
 
 
+def test_memory_given_back_that_no_reading_shows_counts_only_for_a_while():
+    """macOS's reading can take in what the guard gives back and never rise by it (another app took the memory, or
+    macOS used it for something else): the guard then trusts the reading again after UNSEEN_S seconds, and does not
+    stay blind below the floor (issue #58 review)."""
+    from locals.hybrid_batch import UNSEEN_S
+
+    floor = 100 * M
+    reading = [floor - 4 * M]
+    e, lru = _guard(8 * M, floor, reading), _lru(6, 8 * M)
+    now = [0.0]
+    e._now = lambda: now[0]
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert lru.nbytes == 2 * M and e.counters == {"pressure_trims": 1}
+    now[0] = UNSEEN_S / 2  # the same reading soon after: the 4 MiB given back still count
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert lru.nbytes == 2 * M and e.counters == {"pressure_trims": 1}
+    now[0] = UNSEEN_S + 0.01  # still the same reading: the shortfall is real, and the rest of the cache goes
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert lru.nbytes == 0 and lru.max_bytes == 0 and e.counters == {"pressure_trims": 2}
+
+
+def test_checks_with_nothing_new_to_free_run_the_collector_once_a_step(monkeypatch):
+    """Below the floor with the prompt cache empty, an admission's checks (and a GPU-limit trim after the floor check
+    in the same call) found nothing to free but ran gc.collect() and emptied MLX's pool each time (issue #58 review):
+    once per step count is enough while MLX holds no more than after the last one."""
+    import gc
+
+    import mlx.core as mx
+
+    floor = 100 * M
+    e, lru = _guard(8 * M, floor, [floor - 4 * M]), _lru(0, 8 * M)
+    runs = []
+    monkeypatch.setattr(gc, "collect", lambda *a: runs.append(1))
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    e._room_for_copy(lru, 16)
+    e.memory_limit = mx.get_active_memory() - 1  # over the GPU limit too: _trim_for frees for it after the floor check
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert len(runs) == 1
+    e.counters["steps"] = 32  # the next growth check
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert len(runs) == 2
+    keep = mx.zeros((M // 4,))  # MLX holds more than after the last one: it may be garbage, so the collector runs
+    mx.eval(keep)
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert len(runs) == 3
+
+
 def test_the_buffer_pool_and_snapshots_go_before_prompt_cache_entries(monkeypatch):
     import mlx.core as mx
 
@@ -335,3 +384,47 @@ def test_the_system_memory_check_runs_without_a_gpu_limit():
     e._serve_lru, e._next_trim, e.counters["steps"] = lru, 0, 32
     e._growth_trim(1)
     assert lru.nbytes == 3 * M and e.counters["pressure_trims"] == 3
+
+
+def test_growth_trim_off_still_checks_system_memory_every_32_steps(monkeypatch):
+    """Issue #58: LOCALS_GROWTH_TRIM=0 turns off only the room made under the GPU limit for the rows' KV growth; the
+    memory-floor check still runs every 32 steps, so a long reply with no new admission gives memory back."""
+    import mlx.core as mx
+
+    from locals import hybrid_batch
+
+    monkeypatch.setattr(hybrid_batch, "_GROWTH_TRIM", False)
+    floor = 100 * M
+    reading = [floor - 1 * M]
+    e, lru = _guard(8 * M, floor, reading), _lru(6, 8 * M)
+    _settle()
+    e.memory_limit = mx.get_active_memory() - 3 * M  # 3 MiB over the GPU limit: a growth trim would cut for it
+    e._serve_lru, e._next_trim, e.counters["steps"] = lru, 0, 32
+    e._growth_trim(1)
+    assert lru.nbytes == 5 * M and e.counters == {"steps": 32, "pressure_trims": 1}  # no cache_trims: no GPU-limit trim
+    reading[0] -= 1 * M
+    e.counters["steps"] = 40  # before the next 32-step mark: no check
+    e._growth_trim(1)
+    assert lru.nbytes == 5 * M
+    e.counters["steps"] = 64
+    e._growth_trim(1)
+    assert lru.nbytes == 4 * M and e.counters == {"steps": 64, "pressure_trims": 2}
+
+
+def test_a_server_started_in_low_memory_is_capped_at_the_first_check_and_grows_back_to_the_formula():
+    """Issue #58: a server that starts while macOS has less than start budget + floor available keeps the formula's
+    start budget; the first check of the guard caps the cache, and once memory comes back the budget is the start
+    budget again (with the start-time cap of #56 it stayed at the low start for the whole process)."""
+    from locals.service import cache_budget
+
+    floor = 100 * M
+    reading = [floor + 2 * M]  # far below start budget + floor
+    start = cache_budget(LIMIT, 3 * G, 0)
+    assert start == 16 * G
+    e, lru = _guard(start, floor, reading), _lru(6, start)
+    _settle()
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert lru.max_bytes == 8 * M and lru.nbytes == 6 * M  # 6 MiB in the cache + 2 MiB available above the floor
+    reading[0] = floor + start + G  # memory came back
+    e._make_room(lru, tokens=16, copies=0, held=0)
+    assert lru.max_bytes == start

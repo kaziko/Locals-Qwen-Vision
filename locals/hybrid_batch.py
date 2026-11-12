@@ -401,6 +401,18 @@ def _merge_layerwise(caches) -> list:
 
 
 _GROWTH_TRIM = os.environ.get("LOCALS_GROWTH_TRIM", "1") != "0"
+
+
+def _mlx_held() -> int:
+    """MLX's active memory and its pool of freed buffers: what macOS counts as this process's."""
+    return mx.get_active_memory() + mx.get_cache_memory()
+
+
+# Seconds that memory the guard gave back counts as available while no reading shows it (_seen). On a 32 GB Mac
+# (the project venv, a bare MLX process, 2 GiB of random data, run twice) the reading fell at once when MLX took the
+# memory, but rose at most 0.32 GiB in 8 s after MLX freed it: a reading need never show a free. The checks of one
+# admission come one after another; 2 s is a guess that covers them, not a measurement.
+UNSEEN_S = 2.0
 # One request running alone: its forced spans fed in one pass, and prompt-lookup drafts verified in the same
 # pass as the next token (HybridBatchEngine._solo). LOCALS_SOLO=0: one token per step, as with many requests.
 _SOLO = os.environ.get("LOCALS_SOLO", "1") != "0"
@@ -529,6 +541,10 @@ class DiskPromptCache:
         try:
             from mlx_lm.models.cache import load_prompt_cache
 
+            # a snapshot over the cache budget (0 below the memory floor) would be dropped again by its own insert
+            budget = getattr(lru, "max_bytes", None)
+            if budget is not None and (self.dir / f"{best}.safetensors").stat().st_size > budget:
+                return 0
             cache = load_prompt_cache(str(self.dir / f"{best}.safetensors"))
             lru.insert_cache(key, list(prompt[:n]), cache, cache_type="system")
             (self.dir / f"{best}.safetensors").touch()
@@ -585,23 +601,32 @@ def chain_cache(max_size: int, max_bytes: int):
       checkpoint of the request before. A finished reply does not drop the checkpoint of its own
       request: a client that moves a message to the end on every turn (OpenClaw) continues from
       that checkpoint, not from the reply;
-    * never a system-prompt entry: every new session starts from it."""
+    * never a system-prompt entry: every new session starts from it.
+
+    They go before the new entry is inserted, so they no longer count when the insert holds the cache to
+    ``max_bytes``: with a tight budget, it evicted other entries that dropping them would have made room for (issue
+    #58). An entry that does not fit is still not kept, and that costs nothing more than before: in mlx-lm's eviction
+    order a stale copy always goes before the entry that extends it."""
     from mlx_lm.models.cache import LRUPromptCache, can_trim_prompt_cache
 
     class ChainCache(LRUPromptCache):
         def insert_cache(self, model, tokens, prompt_cache, *, cache_type="assistant"):
+            if cache_type != "system" and not can_trim_prompt_cache(prompt_cache):
+                self._drop_stale(model, tokens, cache_type)
             super().insert_cache(model, tokens, prompt_cache, cache_type=cache_type)
-            if cache_type == "system" or can_trim_prompt_cache(prompt_cache):
-                return
-            node = self._trie._trie.get(model)
-            for t in tokens:  # still there (a small cache may have evicted it at once)?
-                node = node.get(t) if node is not None else None
-            if node is None or "__value__" not in node:
-                return
-            for n, entry in self._trie.pop_prefixes(model, tokens):
-                if not (entry.cache_type == "assistant" or (entry.cache_type == "user" and cache_type == "user")):
-                    self._trie.add(model, tokens[:n], entry)  # kept, its place in the LRU unchanged
-                    continue
+
+        def _drop_stale(self, model, tokens, cache_type):
+            node, stale_lens = self._trie._trie.get(model), []
+            for n, t in enumerate(tokens):  # the shorter entries on the new entry's path, by length
+                if node is None:
+                    break
+                old = node.get("__value__")
+                if old is not None and (old.cache_type == "assistant"
+                                        or (old.cache_type == "user" and cache_type == "user")):
+                    stale_lens.append(n)
+                node = node.get(t)
+            for n in stale_lens:
+                entry = self._trie.pop(model, tokens[:n])
                 self._n_bytes -= entry.nbytes
                 self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
                 self._lru.remove(model, tokens[:n])
@@ -674,7 +699,9 @@ class HybridBatchEngine(BatchEngine):
         self.memory_floor = 0
         self.start_budget = 0
         self.read_available = sysmem.available_bytes  # bytes, or None when unknown (then nothing changes)
-        self._unseen = None  # (reading, bytes given back after it that no reading showed yet): see _seen
+        self._unseen = None  # (reading, bytes given back after it that no reading showed yet, when): see _seen
+        self._now = time.monotonic
+        self._freed_at = None  # (step count, MLX's active and pool bytes) after the last _free_unused
         self._kv_tok = None
         self._kv_layers = 1
         self._row_bytes = None  # fixed state bytes per request (_row_state)
@@ -921,11 +948,15 @@ class HybridBatchEngine(BatchEngine):
         """Every 32 steps: the rows' KV grows every step, past what their admission counted, so room for the next
         ``positions`` of each comes out of the prompt cache now, before Metal runs out (which fails every row).
         Called by every kind of step: chained, boundary (all of them while a request waits for memory: the trim
-        never ran then, when memory is tightest) and a lone row's passes."""
+        never ran then, when memory is tightest) and a lone row's passes. LOCALS_GROWTH_TRIM=0 turns off only that
+        room under the GPU limit: the memory-floor check (_pressure_trim) runs every 32 steps all the same (issue #58)."""
         lru = getattr(self, "_serve_lru", None)
-        if lru is not None and _GROWTH_TRIM and self.counters["steps"] >= self._next_trim:
+        if lru is not None and self.counters["steps"] >= self._next_trim:
             self._next_trim = self.counters["steps"] + 32  # (a multiple of 32 can be passed by in a lone row's passes)
-            self._trim_for(lru, n_rows * positions * self._kv_bytes_per_token())
+            if _GROWTH_TRIM:
+                self._trim_for(lru, n_rows * positions * self._kv_bytes_per_token())
+            else:
+                self._pressure_trim(lru)
 
     def _keep_reply(self, r, n: int, cache) -> None:
         _keep_reply_state(r, n, cache)
@@ -979,12 +1010,14 @@ class HybridBatchEngine(BatchEngine):
         """A reading of available memory, plus the bytes the guard gave back since an earlier reading that it does
         not show yet (_note_freed). Dropped entries can share their buffers with a running row (a checkpoint copy, a
         reply's views) and free nothing, and the reading may lag: without this, every check while the reading stayed
-        the same cut the same shortfall again (one admission runs several), until the cache was empty."""
+        the same cut the same shortfall again (one admission runs several), until the cache was empty. They count for
+        UNSEEN_S seconds at most: a reading need never show them (another app took the memory, or macOS used it), and
+        the guard must not stay blind below the floor."""
         if self._unseen is None:
             return raw
-        at, freed = self._unseen
+        at, freed, when = self._unseen
         left = freed - max(0, raw - at)
-        if left <= 0:
+        if left <= 0 or self._now() - when > UNSEEN_S:
             self._unseen = None
             return raw
         return raw + left
@@ -992,23 +1025,30 @@ class HybridBatchEngine(BatchEngine):
     def _note_freed(self, raw: int, n: int) -> None:
         """``n`` bytes given back after the reading ``raw``: counted as available until a reading shows them."""
         if n > 0:
-            self._unseen = (raw, self._seen(raw) - raw + n)
+            self._unseen = (raw, self._seen(raw) - raw + n, self._now())
 
     def _free_unused(self, short) -> bool:
         """Free what costs no prompt-cache entry, cheapest first, while ``short()`` (asked after each step) holds:
         finished rows' caches in reference cycles and MLX's pool of freed buffers (macOS counts it as used, and the GPU
-        limit does too), then the shared-prefix snapshots. Whether it still holds."""
+        limit does too), then the shared-prefix snapshots. Whether it still holds. The collector and the pool run once
+        per step count while MLX holds no more than after the last time: an admission's checks come one after another
+        with nothing new to free, and below the floor each one ran them again (issue #58 review)."""
         import gc
 
-        gc.collect()  # finished rows' caches can sit in reference cycles until the collector runs
-        mx.clear_cache()
-        if not short():
-            return False
-        if self.snapshots:
-            self.snapshots.clear()
+        step = self.counters.get("steps", 0)
+        if self._freed_at is None or self._freed_at[0] != step or _mlx_held() > self._freed_at[1]:
+            gc.collect()  # finished rows' caches can sit in reference cycles until the collector runs
             mx.clear_cache()
-            return short()
-        return True
+        try:
+            if not short():
+                return False
+            if self.snapshots:
+                self.snapshots.clear()
+                mx.clear_cache()
+                return short()
+            return True
+        finally:
+            self._freed_at = (step, _mlx_held())
 
     def _pressure_trim(self, lru, adding: int = 0) -> None:
         """Set the prompt cache's budget from the memory macOS has available (_budget); ``adding``: the bytes of an
@@ -1023,11 +1063,11 @@ class HybridBatchEngine(BatchEngine):
         if raw is None:
             return
         if self._seen(raw) < self.memory_floor:
-            held = mx.get_active_memory() + mx.get_cache_memory()
+            held = _mlx_held()
 
             def short():
                 nonlocal raw, held
-                now = mx.get_active_memory() + mx.get_cache_memory()
+                now = _mlx_held()
                 self._note_freed(raw, held - now)
                 held = now
                 again = self.read_available()

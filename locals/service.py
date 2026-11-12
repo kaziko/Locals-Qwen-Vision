@@ -192,18 +192,15 @@ def memory_plan(limit: int, weights: int) -> tuple:
 MIN_CACHE_BYTES = int(1.5 * (1 << 30))  # the smallest prompt-cache budget (both engines)
 
 
-def cache_budget(limit: int, active: int, longest: int, cache_bytes: Optional[int] = None,
-                 available: Optional[int] = None, floor: int = 0) -> int:
-    """The prompt cache's start budget (GLOSSARY.md "Cache budget"). ``cache_bytes`` (--cache-gb) is used as it is.
+def cache_budget(limit: int, active: int, longest: int, cache_bytes: Optional[int] = None) -> int:
+    """The prompt cache's start budget (GLOSSARY.md "Start budget"). ``cache_bytes`` (--cache-gb) is used as it is.
     Else what the GPU limit leaves after the weights (``active``) and 5 GB for running rows and prefill, at least one
     conversation as long as fits (``longest``: its follow-up question then continues from it, 1.5 s instead of 137 s
-    at 60k tokens), 1.5 GiB to 16 GiB, and with a memory ``floor`` at most ``available - floor`` (issue #56)."""
+    at 60k tokens), 1.5 GiB to 16 GiB. System memory does not change it: the memory guard caps the budget below it at
+    run time, and the budget grows back to it when memory comes back (_pressure_trim; issue #58)."""
     if cache_bytes:
         return int(cache_bytes)
-    budget = min(max(limit - active - (5 << 30), longest, MIN_CACHE_BYTES), 16 << 30)
-    if floor and available is not None:
-        budget = max(min(budget, available - floor), MIN_CACHE_BYTES)
-    return int(budget)
+    return int(min(max(limit - active - (5 << 30), longest, MIN_CACHE_BYTES), 16 << 30))
 
 
 _SERVICES: "weakref.WeakSet" = weakref.WeakSet()  # the engines of this process (locals bench serves two at once)
@@ -751,13 +748,12 @@ class BatchService:
         from . import sysmem
 
         # the memory the server leaves free for other apps (issue #56): the prompt cache's budget follows the
-        # memory macOS has available, at start and at each check of the memory guard; LOCALS_MEMORY_FLOOR_PCT=0: off
-        floor = sysmem.floor_bytes()
+        # memory macOS has available at each check of the memory guard, up to the start budget (issue #58: not
+        # capped at start); LOCALS_MEMORY_FLOOR_PCT=0: off
         active = mx.get_active_memory()  # (read before context_fit, as before issue #56)
         longest = (self.context_fit() or 0) * eng._kv_bytes_per_token()
-        self.cache_bytes = cache_budget(limit, active, longest, self.cache_bytes,
-                                        available=eng.read_available() if floor else None, floor=floor)
-        eng.memory_floor, eng.start_budget = floor, self.cache_bytes
+        self.cache_bytes = cache_budget(limit, active, longest, self.cache_bytes)
+        eng.memory_floor, eng.start_budget = sysmem.floor_bytes(), self.cache_bytes
         lru = chain_cache(max_size=256, max_bytes=self.cache_bytes)
         self._lru = lru
         owner = self._owner = {}

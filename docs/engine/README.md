@@ -350,7 +350,7 @@ A Metal out-of-memory error fails every request in flight, while a prompt-cache 
 | `_make_room(lru, tokens, copies, held, rows=1)` | Calls `_trim_for` for `(tokens * (1 + copies) + held) * kv + _admit_bytes(rows, tokens)` before an admission: each new row's fixed state and 256 positions of KV, and the room a read of that size took, plus a sixth (1.5 GiB, `PREFILL_RESERVE`, until one has been recorded). |
 | `_fits` | The admission check described under "Admission". |
 | `_room_for_copy(lru, positions)` | Before a checkpoint copy: trims, then skips the copy if `positions * kv + _admit_bytes(0, PREFILL_TOKENS)` still does not fit. The copy shares the request's KV buffers, so the request's next write duplicates them. |
-| Growth trim | Every 32 steps (`_growth_trim`: boundary steps, chained steps and a lone row's passes, which count 64 positions), calls `_trim_for(lru, len(rows) * 32 * kv)`. The rows' KV grows past what admission counted, so room for the next 32 steps comes out of the prompt cache in advance. `LOCALS_GROWTH_TRIM=0` turns this off (default `"1"`). |
+| Growth trim | Every 32 steps (`_growth_trim`: boundary steps, chained steps and a lone row's passes, which count 64 positions), calls `_trim_for(lru, len(rows) * 32 * kv)`. The rows' KV grows past what admission counted, so room for the next 32 steps comes out of the prompt cache in advance. `LOCALS_GROWTH_TRIM=0` turns this off (default `"1"`); the memory-floor check (`_pressure_trim`) then still runs every 32 steps (issue #58). |
 | Retire trim | See "Retiring rows". |
 
 `LOCALS_MEMLOG=1` prints active and peak GPU memory, prompt-cache size and the limit around each admission, reservation and trim. `LOCALS_PREFILL_LOG=1` prints each batch prefill (rows, prompt lengths, tokens to prefill) and each checkpoint.
@@ -448,7 +448,7 @@ Any other exception escapes `serve`, for example a Metal out-of-memory error. `B
 | `share_prefix`, `min_share`, `tail_ok` | `True`, 64, 32 | `HybridBatchEngine(...)` (`tail_ok` is used only by the ragged `run` path and by `_run_sync`, both through `_prefill`) |
 | `LOCALS_MIX_CHUNK` | 1024 | Rows plus prompt tokens in a mixed pass; 0 turns mixed passes off |
 | `LOCALS_MAX_SNAPSHOTS` | 4 | Shared-prefix snapshots kept |
-| `LOCALS_GROWTH_TRIM` | `1` | `0` turns off the trim every 32 steps |
+| `LOCALS_GROWTH_TRIM` | `1` | `0` turns off the trim every 32 steps under the GPU limit; the memory-floor check still runs |
 | `LOCALS_SOLO` | `1` | `0`: one token per step for a request alone too (no forced spans in one pass, no drafts) |
 | `LOCALS_MTP`, `LOCALS_MTP_DRAFTS` | unset, 1 | The MTP layer's file, and its drafts per pass (below) |
 | `LOCALS_MTP_BACKOFF` | unset | The back-off after rejected MTP drafts in both loops: `1` on, `0` off; unset, each loop's own (`mtp_backoff`; issue #37 measured both) |
