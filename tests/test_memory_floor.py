@@ -487,7 +487,16 @@ def _request(tokens):
     return SimpleNamespace(prompt=[1] * tokens, checkpoints=[])
 
 
-def test_admission_waits_when_it_would_put_system_memory_below_the_floor():
+@pytest.fixture
+def no_pool(monkeypatch):
+    """MLX's pool of freed buffers reads empty: _fits counts the pool as memory to give back, and what is left in the
+    real one (whatever ran before) moved these tests' few-MiB margins (issue #59 review)."""
+    import mlx.core as mx
+
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+
+
+def test_admission_waits_when_it_would_put_system_memory_below_the_floor(no_pool):
     """Issue #59: a request that fits under the GPU limit still waits when admitting it would put the memory macOS
     has available below the floor. The prompt cache counts as memory that can be given back (below the floor the
     guard empties it)."""
@@ -516,7 +525,7 @@ def test_admission_ignores_the_floor_when_it_is_off_or_the_reading_is_unknown():
     assert e._fits(None, r, held=0) and e.reads == [1]
 
 
-def test_an_admission_that_fits_above_the_floor_makes_its_room_there():
+def test_an_admission_that_fits_above_the_floor_makes_its_room_there(no_pool):
     """Issue #59 review: _fits counts the prompt cache as memory to give back, so the admission's _make_room gives
     back what the request needs below the floor, though the reading is still above it (it did nothing there, and
     the prefill took available memory below the floor until the next check)."""
@@ -527,7 +536,7 @@ def test_an_admission_that_fits_above_the_floor_makes_its_room_there():
     _settle()
     assert e._fits(lru, _request(1024), held=0)
     e._make_room(lru, tokens=1024, copies=0, held=0)
-    assert lru.nbytes <= 40 * M + 5 * M - 20 * M and lru.max_bytes <= 25 * M
+    assert lru.nbytes == lru.max_bytes == 40 * M + 5 * M - 20 * M  # what it needs, and no more
     assert e.counters == {"pressure_trims": 1}
 
 

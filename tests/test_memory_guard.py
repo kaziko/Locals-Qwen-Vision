@@ -145,8 +145,7 @@ def test_recurrent_op_matches_mlx_lm():
 MODEL = "mlx-community/Qwen3.5-4B-MLX-4bit"
 
 
-@pytest.fixture(scope="module")
-def service():
+def _service():
     from huggingface_hub import snapshot_download
 
     try:
@@ -164,6 +163,18 @@ def service():
         os.environ.pop("LOCALS_DISK_CACHE", None)
     else:
         os.environ["LOCALS_DISK_CACHE"] = saved
+
+
+@pytest.fixture(scope="module")
+def service():
+    yield from _service()
+
+
+@pytest.fixture
+def own_service():
+    """A service of its own, for a test that empties the prompt cache and the shared-prefix snapshots: what it drops
+    cannot be put back, and a later test on the module's service would miss it."""
+    yield from _service()
 
 
 @pytest.mark.model
@@ -268,9 +279,11 @@ def test_a_prompt_read_alone_stops_when_its_client_goes(service):
 
 
 @pytest.mark.model
-def test_below_the_floor_requests_wait_for_the_running_ones_and_all_finish(service, monkeypatch):
+def test_below_the_floor_requests_wait_for_the_running_ones_and_all_finish(own_service, monkeypatch):
     """Issue #59: with plenty of room under the GPU limit but system memory below the floor, a request waits while
-    others run, and one that is alone still starts: all four finish, admitted one at a time."""
+    others run, and one that is alone still starts: all four finish, admitted one at a time. (Below the floor the
+    guard empties the prompt cache and the snapshots: this test has a service of its own.)"""
+    service = own_service
     eng = service._eng
     tok = service.tokenizer
     service.submit(tok.encode("Hello"), max_tokens=2).wait(600)
@@ -278,9 +291,6 @@ def test_below_the_floor_requests_wait_for_the_running_ones_and_all_finish(servi
     if avail is None:
         pytest.skip("system memory unreadable here: the floor check passes on an unknown reading")
     monkeypatch.setattr(eng, "memory_limit", mx.get_active_memory() + (8 << 30))
-    # the guard below the floor sets the cache budget to 0 and counts memory given back: both restored afterwards
-    monkeypatch.setattr(service._lru, "max_bytes", service._lru.max_bytes)
-    monkeypatch.setattr(eng, "_unseen", None)
     monkeypatch.setattr(eng, "memory_floor", avail + (64 << 30))  # always below it
     before = dict(eng.counters)
     jobs = [service.submit(tok.encode(p), max_tokens=8, ignore_eos=True)
